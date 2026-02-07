@@ -7,7 +7,6 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -19,8 +18,9 @@ import (
 	"github.com/grixate/squidbot/internal/config"
 	"github.com/grixate/squidbot/internal/cron"
 	storepkg "github.com/grixate/squidbot/internal/storage/bbolt"
-	migratepkg "github.com/grixate/squidbot/internal/storage/migrate"
 )
+
+const legacyMigrateRemovedErr = "legacy migration has been removed and is no longer supported"
 
 func main() {
 	logger := log.New(os.Stderr, "", log.LstdFlags)
@@ -45,13 +45,6 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-}
-
-func resolvedConfigPath(path string) string {
-	if strings.TrimSpace(path) != "" {
-		return path
-	}
-	return config.ConfigPath()
 }
 
 func loadCfg(path string) (config.Config, error) {
@@ -422,40 +415,16 @@ func migrateCmd(configPath string) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "migrate",
-		Short: "Import legacy data from ~/.nanobot into squidbot",
+		Short: "Legacy migration command (removed)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := loadCfg(configPath)
-			if err != nil {
-				return err
-			}
-			if err := config.EnsureFilesystem(cfg); err != nil {
-				return err
-			}
-
-			store, err := storepkg.Open(cfg.Storage.DBPath)
-			if err != nil {
-				return err
-			}
-			defer store.Close()
-
-			report, err := migratepkg.ImportLegacy(context.Background(), legacyHome, resolvedConfigPath(configPath), cfg, store, mergeConfig)
-			if err != nil {
-				return err
-			}
-
-			fmt.Println("Migration completed")
-			fmt.Printf("- Sessions imported: %d\n", report.SessionsImported)
-			fmt.Printf("- Turns imported: %d\n", report.TurnsImported)
-			fmt.Printf("- Jobs imported: %d\n", report.JobsImported)
-			fmt.Printf("- Workspace files copied: %d\n", report.FilesCopied)
-			fmt.Printf("- Config merged: %v\n", report.ConfigMerged)
-			return nil
+			_ = legacyHome
+			_ = mergeConfig
+			_ = configPath
+			return fmt.Errorf(legacyMigrateRemovedErr)
 		},
 	}
 
-	home, _ := os.UserHomeDir()
-	defaultLegacy := filepath.Join(home, ".nanobot")
-	cmd.Flags().StringVar(&legacyHome, "from-legacy-home", defaultLegacy, "Legacy home directory to import from")
-	cmd.Flags().BoolVar(&mergeConfig, "merge-config", true, "Merge legacy config values into squidbot config when target fields are empty")
+	cmd.Flags().StringVar(&legacyHome, "from-legacy-home", "~/.nanobot", "Legacy home directory (deprecated; ignored)")
+	cmd.Flags().BoolVar(&mergeConfig, "merge-config", true, "Legacy config merge toggle (deprecated; ignored)")
 	return cmd
 }

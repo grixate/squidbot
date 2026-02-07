@@ -11,7 +11,6 @@ Go-native personal AI assistant with Telegram integration, actor-based session r
 - Telegram channel adapter (polling)
 - Cron scheduler and heartbeat service
 - Structured runtime metrics counters
-- Legacy import command (`squidbot migrate --from-legacy-home ~/.nanobot`)
 
 ## Install
 
@@ -38,13 +37,7 @@ go build -o squidbot ./cmd/squidbot
 ./squidbot gateway
 ```
 
-## Migrate From Legacy
-
-```bash
-./squidbot migrate --from-legacy-home ~/.nanobot
-```
-
-This imports legacy sessions, cron jobs, and workspace files. By default it also merges missing config fields from the legacy config.
+Legacy migration support has been removed; `squidbot migrate` now returns an error and will be deleted in the next release.
 
 ## CLI
 
@@ -56,7 +49,6 @@ This imports legacy sessions, cron jobs, and workspace files. By default it also
 - `squidbot telegram status`
 - `squidbot cron list|add|remove|enable|run`
 - `squidbot doctor`
-- `squidbot migrate --from-legacy-home ~/.nanobot`
 
 ## Testing
 
