@@ -64,7 +64,9 @@ func (p *OpenAICompatProvider) Chat(ctx context.Context, req ChatRequest) (ChatR
 	if err != nil {
 		return ChatResponse{}, err
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
+	if strings.TrimSpace(p.apiKey) != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
+	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	resp, err := p.client.Do(httpReq)

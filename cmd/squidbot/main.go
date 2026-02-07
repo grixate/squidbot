@@ -20,8 +20,6 @@ import (
 	storepkg "github.com/grixate/squidbot/internal/storage/bbolt"
 )
 
-const legacyMigrateRemovedErr = "legacy migration has been removed and is no longer supported"
-
 func main() {
 	logger := log.New(os.Stderr, "", log.LstdFlags)
 
@@ -39,12 +37,18 @@ func main() {
 	root.AddCommand(telegramCmd(configPath))
 	root.AddCommand(cronCmd(configPath, logger))
 	root.AddCommand(doctorCmd(configPath))
-	root.AddCommand(migrateCmd(configPath))
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func resolvedConfigPath(path string) string {
+	if strings.TrimSpace(path) != "" {
+		return path
+	}
+	return config.ConfigPath()
 }
 
 func loadCfg(path string) (config.Config, error) {
@@ -60,23 +64,60 @@ func loadCfg(path string) (config.Config, error) {
 }
 
 func onboardCmd(configPath string) *cobra.Command {
-	return &cobra.Command{
+	var providerName string
+	var apiKey string
+	var apiBase string
+	var model string
+	var nonInteractive bool
+	var verifyGeminiCLI bool
+
+	cmd := &cobra.Command{
 		Use:   "onboard",
 		Short: "Initialize squidbot config and workspace",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg := config.Default()
-			if err := config.Save(configPath, cfg); err != nil {
+			cfg, err := loadCfg(configPath)
+			if err != nil {
 				return err
 			}
-			if err := config.EnsureFilesystem(cfg); err != nil {
+			result, err := config.RunOnboarding(cmd.Context(), cfg, config.OnboardingOptions{
+				Provider:        providerName,
+				APIKey:          apiKey,
+				APIBase:         apiBase,
+				Model:           model,
+				NonInteractive:  nonInteractive,
+				VerifyGeminiCLI: verifyGeminiCLI,
+				In:              cmd.InOrStdin(),
+				Out:             cmd.OutOrStdout(),
+			})
+			if err != nil {
 				return err
 			}
-			fmt.Printf("Created config at %s\n", config.ConfigPath())
-			fmt.Printf("Workspace ready at %s\n", config.WorkspacePath(cfg))
-			fmt.Println("Next: set API key in ~/.squidbot/config.json and run `squidbot agent -m \"hello\"`")
+			if err := config.Save(configPath, result.Config); err != nil {
+				return err
+			}
+			if err := config.EnsureFilesystem(result.Config); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Saved config at %s\n", resolvedConfigPath(configPath))
+			fmt.Fprintf(cmd.OutOrStdout(), "Workspace ready at %s\n", config.WorkspacePath(result.Config))
+			fmt.Fprintf(cmd.OutOrStdout(), "Active provider: %s\n", result.Provider)
+			if result.GeminiCLIVerifyRan && result.GeminiCLIVerified {
+				fmt.Fprintln(cmd.OutOrStdout(), "Gemini CLI verification passed")
+			}
+			for _, warning := range result.Warnings {
+				fmt.Fprintf(cmd.OutOrStdout(), "Warning: %s\n", warning)
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), "Next: run `squidbot agent -m \"hello\"`")
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&providerName, "provider", "", "Provider id (openrouter|anthropic|openai|gemini|ollama|lmstudio)")
+	cmd.Flags().StringVar(&apiKey, "api-key", "", "Provider API key")
+	cmd.Flags().StringVar(&apiBase, "api-base", "", "Provider API base URL")
+	cmd.Flags().StringVar(&model, "model", "", "Provider model")
+	cmd.Flags().BoolVar(&nonInteractive, "non-interactive", false, "Disable prompts and require explicit inputs")
+	cmd.Flags().BoolVar(&verifyGeminiCLI, "verify-gemini-cli", false, "Verify Gemini CLI connectivity during onboarding")
+	return cmd
 }
 
 func statusCmd(configPath string) *cobra.Command {
@@ -93,6 +134,15 @@ func statusCmd(configPath string) *cobra.Command {
 			fmt.Printf("Workspace: %s [%v]\n", st.Workspace, st.WorkspaceOK)
 			fmt.Printf("Data root: %s [%v]\n", st.DataRoot, st.DataRootOK)
 			fmt.Printf("Model: %s\n", cfg.Agents.Defaults.Model)
+			if providerName, _ := cfg.PrimaryProvider(); providerName != "" {
+				fmt.Printf("Detected provider: %s\n", providerName)
+			}
+			fmt.Printf("Active provider: %s\n", cfg.Providers.Active)
+			if err := config.ValidateActiveProvider(cfg); err != nil {
+				fmt.Printf("Provider ready: false (%v)\n", err)
+			} else {
+				fmt.Println("Provider ready: true")
+			}
 			fmt.Printf("Storage backend: %s\n", cfg.Storage.Backend)
 			fmt.Printf("Telegram enabled: %v\n", cfg.Channels.Telegram.Enabled)
 			return nil
@@ -110,6 +160,9 @@ func agentCmd(configPath string, logger *log.Logger) *cobra.Command {
 			cfg, err := loadCfg(configPath)
 			if err != nil {
 				return err
+			}
+			if err := config.ValidateActiveProvider(cfg); err != nil {
+				return fmt.Errorf("provider setup incomplete: %w. Run `squidbot onboard`", err)
 			}
 			if err := config.EnsureFilesystem(cfg); err != nil {
 				return err
@@ -182,6 +235,9 @@ func gatewayCmd(configPath string, logger *log.Logger) *cobra.Command {
 			cfg, err := loadCfg(configPath)
 			if err != nil {
 				return err
+			}
+			if err := config.ValidateActiveProvider(cfg); err != nil {
+				return fmt.Errorf("provider setup incomplete: %w. Run `squidbot onboard`", err)
 			}
 			if err := config.EnsureFilesystem(cfg); err != nil {
 				return err
@@ -365,6 +421,9 @@ func cronCmd(configPath string, logger *log.Logger) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if err := config.ValidateActiveProvider(cfg); err != nil {
+				return fmt.Errorf("provider setup incomplete: %w. Run `squidbot onboard`", err)
+			}
 			runtime, err := app.BuildRuntime(cfg, logger)
 			if err != nil {
 				return err
@@ -389,9 +448,8 @@ func doctorCmd(configPath string) *cobra.Command {
 				return err
 			}
 			problems := []string{}
-			providerName, _ := cfg.PrimaryProvider()
-			if providerName == "" {
-				problems = append(problems, "No provider API key configured (openrouter/anthropic/openai)")
+			if err := config.ValidateActiveProvider(cfg); err != nil {
+				problems = append(problems, err.Error())
 			}
 			if cfg.Channels.Telegram.Enabled && strings.TrimSpace(cfg.Channels.Telegram.Token) == "" {
 				problems = append(problems, "Telegram enabled but token missing")
@@ -407,24 +465,4 @@ func doctorCmd(configPath string) *cobra.Command {
 			return fmt.Errorf("doctor checks failed")
 		},
 	}
-}
-
-func migrateCmd(configPath string) *cobra.Command {
-	var legacyHome string
-	var mergeConfig bool
-
-	cmd := &cobra.Command{
-		Use:   "migrate",
-		Short: "Legacy migration command (removed)",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			_ = legacyHome
-			_ = mergeConfig
-			_ = configPath
-			return fmt.Errorf(legacyMigrateRemovedErr)
-		},
-	}
-
-	cmd.Flags().StringVar(&legacyHome, "from-legacy-home", "~/.nanobot", "Legacy home directory (deprecated; ignored)")
-	cmd.Flags().BoolVar(&mergeConfig, "merge-config", true, "Legacy config merge toggle (deprecated; ignored)")
-	return cmd
 }

@@ -7,7 +7,8 @@ Go-native personal AI assistant with Telegram integration, actor-based session r
 - Session actor runtime with bounded mailboxes and idle eviction
 - BoltDB primary storage (`~/.squidbot/data/squidbot.db`)
 - Tool loop with typed tool argument boundaries
-- Provider adapters for OpenRouter/OpenAI and Anthropic
+- Provider adapters for OpenRouter, Anthropic, OpenAI, Gemini, Ollama, and LM Studio
+- Mandatory provider-gated onboarding before runtime commands
 - Telegram channel adapter (polling)
 - Cron scheduler and heartbeat service
 - Structured runtime metrics counters
@@ -25,7 +26,8 @@ go build -o squidbot ./cmd/squidbot
 ./squidbot onboard
 ```
 
-2. Set your provider API key in `~/.squidbot/config.json`.
+2. Follow CLI prompts to choose provider and enter credentials/model.
+   For Gemini you can optionally verify Gemini CLI connectivity during onboarding.
 
 3. Run direct chat:
 ```bash
@@ -37,7 +39,25 @@ go build -o squidbot ./cmd/squidbot
 ./squidbot gateway
 ```
 
-Legacy migration support has been removed; `squidbot migrate` now returns an error and will be deleted in the next release.
+## Non-Interactive Onboarding
+
+Example: Gemini
+
+```bash
+./squidbot onboard --non-interactive --provider gemini --api-key "$SQUIDBOT_GEMINI_API_KEY" --model gemini-3.0-pro --verify-gemini-cli
+```
+
+Example: Ollama
+
+```bash
+./squidbot onboard --non-interactive --provider ollama --model llama3.1:8b --api-base http://localhost:11434/v1
+```
+
+Example: LM Studio
+
+```bash
+./squidbot onboard --non-interactive --provider lmstudio --model local-model --api-base http://localhost:1234/v1
+```
 
 ## CLI
 
