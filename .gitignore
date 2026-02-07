@@ -1,0 +1,6 @@
+/bin/
+/dist/
+*.db
+*.db.lock
+*.log
+.DS_Store
