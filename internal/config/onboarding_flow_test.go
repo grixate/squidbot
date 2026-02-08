@@ -3,12 +3,13 @@ package config
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 )
 
 func TestRunOnboardingInteractiveGeminiFlashWithVerification(t *testing.T) {
-	input := strings.NewReader("4\nsk-gemini\n\n2\ny\n")
+	input := strings.NewReader("4\nsk-gemini\n\n2\nn\ny\n")
 	var output strings.Builder
 	runCalled := false
 
@@ -111,7 +112,7 @@ func TestRunOnboardingNonInteractiveOllamaSuccess(t *testing.T) {
 }
 
 func TestRunOnboardingGeminiVerificationWarningInteractive(t *testing.T) {
-	input := strings.NewReader("4\nsk-gemini\n\n1\ny\n")
+	input := strings.NewReader("4\nsk-gemini\n\n1\nn\ny\n")
 	result, err := RunOnboarding(context.Background(), Default(), OnboardingOptions{
 		In:  input,
 		Out: &strings.Builder{},
@@ -153,7 +154,7 @@ func TestRunOnboardingGeminiVerificationStrictNonInteractive(t *testing.T) {
 }
 
 func TestRunOnboardingInteractiveGeminiCustomModel(t *testing.T) {
-	input := strings.NewReader("4\nsk-gemini\n\n3\ngemini-3.0-custom\nn\n")
+	input := strings.NewReader("4\nsk-gemini\n\n3\ngemini-3.0-custom\nn\nn\n")
 	result, err := RunOnboarding(context.Background(), Default(), OnboardingOptions{
 		In:  input,
 		Out: &strings.Builder{},
@@ -166,5 +167,110 @@ func TestRunOnboardingInteractiveGeminiCustomModel(t *testing.T) {
 	}
 	if result.GeminiCLIVerifyRan {
 		t.Fatal("did not expect verification to run")
+	}
+}
+
+func TestRunOnboardingInteractiveTelegramConfig(t *testing.T) {
+	input := strings.NewReader("5\n\n\n\ny\nbot-token\n123,@Alice,@alice,456\n")
+	result, err := RunOnboarding(context.Background(), Default(), OnboardingOptions{
+		In:  input,
+		Out: &strings.Builder{},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Config.Channels.Telegram.Enabled {
+		t.Fatal("expected telegram to be enabled")
+	}
+	if result.Config.Channels.Telegram.Token != "bot-token" {
+		t.Fatalf("unexpected telegram token: %q", result.Config.Channels.Telegram.Token)
+	}
+	wantAllow := []string{"123", "@Alice", "456"}
+	if !reflect.DeepEqual(result.Config.Channels.Telegram.AllowFrom, wantAllow) {
+		t.Fatalf("unexpected allow list: %#v", result.Config.Channels.Telegram.AllowFrom)
+	}
+}
+
+func TestRunOnboardingInteractiveTelegramEnabledRequiresToken(t *testing.T) {
+	input := strings.NewReader("5\n\n\n\ny\n\n\n")
+	_, err := RunOnboarding(context.Background(), Default(), OnboardingOptions{
+		In:  input,
+		Out: &strings.Builder{},
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "telegram enabled requires token") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunOnboardingInteractiveTelegramDisablePreservesTokenAndAllowList(t *testing.T) {
+	cfg := Default()
+	cfg.Channels.Telegram.Enabled = true
+	cfg.Channels.Telegram.Token = "existing-token"
+	cfg.Channels.Telegram.AllowFrom = []string{"123", "@user"}
+
+	input := strings.NewReader("\n\n\nn\n")
+	result, err := RunOnboarding(context.Background(), cfg, OnboardingOptions{
+		Provider: ProviderOllama,
+		In:       input,
+		Out:      &strings.Builder{},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Config.Channels.Telegram.Enabled {
+		t.Fatal("expected telegram to be disabled")
+	}
+	if result.Config.Channels.Telegram.Token != "existing-token" {
+		t.Fatalf("unexpected token: %q", result.Config.Channels.Telegram.Token)
+	}
+	wantAllow := []string{"123", "@user"}
+	if !reflect.DeepEqual(result.Config.Channels.Telegram.AllowFrom, wantAllow) {
+		t.Fatalf("unexpected allow list: %#v", result.Config.Channels.Telegram.AllowFrom)
+	}
+}
+
+func TestRunOnboardingNonInteractiveTelegramEnabledRequiresToken(t *testing.T) {
+	_, err := RunOnboarding(context.Background(), Default(), OnboardingOptions{
+		Provider:           ProviderOllama,
+		Model:              "llama3.1:8b",
+		NonInteractive:     true,
+		TelegramEnabledSet: true,
+		TelegramEnabled:    true,
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "telegram enabled requires token") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunOnboardingNonInteractiveTelegramExplicitOverrides(t *testing.T) {
+	result, err := RunOnboarding(context.Background(), Default(), OnboardingOptions{
+		Provider:             ProviderOllama,
+		Model:                "llama3.1:8b",
+		NonInteractive:       true,
+		TelegramEnabledSet:   true,
+		TelegramEnabled:      true,
+		TelegramTokenSet:     true,
+		TelegramToken:        "bot-token",
+		TelegramAllowFromSet: true,
+		TelegramAllowFrom:    []string{"123,@alice", "@Alice", "456", ""},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Config.Channels.Telegram.Enabled {
+		t.Fatal("expected telegram to be enabled")
+	}
+	if result.Config.Channels.Telegram.Token != "bot-token" {
+		t.Fatalf("unexpected token: %q", result.Config.Channels.Telegram.Token)
+	}
+	wantAllow := []string{"123", "@alice", "456"}
+	if !reflect.DeepEqual(result.Config.Channels.Telegram.AllowFrom, wantAllow) {
+		t.Fatalf("unexpected allow list: %#v", result.Config.Channels.Telegram.AllowFrom)
 	}
 }

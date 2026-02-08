@@ -27,6 +27,7 @@ go build -o squidbot ./cmd/squidbot
 ```
 
 2. Follow CLI prompts to choose provider and enter credentials/model.
+   Onboarding also supports optional Telegram setup (enable flag, bot token, allow list).
    For Gemini you can optionally verify Gemini CLI connectivity during onboarding.
 
 3. Run direct chat:
@@ -44,7 +45,7 @@ go build -o squidbot ./cmd/squidbot
 Example: Gemini
 
 ```bash
-./squidbot onboard --non-interactive --provider gemini --api-key "$SQUIDBOT_GEMINI_API_KEY" --model gemini-3.0-pro --verify-gemini-cli
+./squidbot onboard --non-interactive --provider gemini --api-key "$SQUIDBOT_GEMINI_API_KEY" --model gemini-3.0-pro --verify-gemini-cli --telegram-enabled --telegram-token "$SQUIDBOT_TELEGRAM_TOKEN" --telegram-allow-from 123456789 --telegram-allow-from @my_username
 ```
 
 Example: Ollama
@@ -58,6 +59,12 @@ Example: LM Studio
 ```bash
 ./squidbot onboard --non-interactive --provider lmstudio --model local-model --api-base http://localhost:1234/v1
 ```
+
+Telegram flags for non-interactive onboarding:
+
+- `--telegram-enabled` (must include `--telegram-token` when true)
+- `--telegram-token <bot_token>`
+- `--telegram-allow-from <id_or_username>` (repeatable, comma-separated values also supported)
 
 ## CLI
 

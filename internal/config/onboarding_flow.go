@@ -12,12 +12,18 @@ import (
 )
 
 type OnboardingOptions struct {
-	Provider        string
-	APIKey          string
-	APIBase         string
-	Model           string
-	NonInteractive  bool
-	VerifyGeminiCLI bool
+	Provider             string
+	APIKey               string
+	APIBase              string
+	Model                string
+	NonInteractive       bool
+	VerifyGeminiCLI      bool
+	TelegramEnabledSet   bool
+	TelegramEnabled      bool
+	TelegramTokenSet     bool
+	TelegramToken        string
+	TelegramAllowFromSet bool
+	TelegramAllowFrom    []string
 
 	In  io.Reader
 	Out io.Writer
@@ -68,7 +74,14 @@ func RunOnboarding(ctx context.Context, cfg Config, opts OnboardingOptions) (Onb
 	cfg.Providers.Active = providerName
 	_ = cfg.SetProviderByName(providerName, providerCfg)
 
+	if err := fillOnboardingTelegramConfig(&cfg, opts, reader, out); err != nil {
+		return OnboardingResult{}, err
+	}
+
 	if err := ValidateActiveProvider(cfg); err != nil {
+		return OnboardingResult{}, err
+	}
+	if err := validateTelegramOnboarding(cfg); err != nil {
 		return OnboardingResult{}, err
 	}
 
@@ -196,6 +209,69 @@ func fillOnboardingProviderConfig(providerName string, providerCfg *ProviderConf
 		providerCfg.Model = strings.TrimSpace(value)
 	}
 
+	return nil
+}
+
+func fillOnboardingTelegramConfig(cfg *Config, opts OnboardingOptions, reader *bufio.Reader, out io.Writer) error {
+	if opts.NonInteractive {
+		applyExplicitTelegramOnboardingOverrides(cfg, opts)
+		return nil
+	}
+
+	defaultEnabled := cfg.Channels.Telegram.Enabled
+	if opts.TelegramEnabledSet {
+		defaultEnabled = opts.TelegramEnabled
+	}
+	enabled, err := promptYesNo(reader, out, "Enable Telegram channel?", defaultEnabled)
+	if err != nil {
+		return err
+	}
+	if !enabled {
+		cfg.Channels.Telegram.Enabled = false
+		return nil
+	}
+
+	tokenDefault := cfg.Channels.Telegram.Token
+	if opts.TelegramTokenSet {
+		tokenDefault = strings.TrimSpace(opts.TelegramToken)
+	}
+	token, err := promptLine(reader, out, "Telegram bot token", tokenDefault)
+	if err != nil {
+		return err
+	}
+
+	allowDefaultValues := cfg.Channels.Telegram.AllowFrom
+	if opts.TelegramAllowFromSet {
+		allowDefaultValues = normalizeAllowFrom(opts.TelegramAllowFrom)
+	}
+	allowListPromptDefault := strings.Join(allowDefaultValues, ",")
+	allowListInput, err := promptLine(reader, out, "Telegram allow list (comma-separated, optional)", allowListPromptDefault)
+	if err != nil {
+		return err
+	}
+
+	cfg.Channels.Telegram.Enabled = true
+	cfg.Channels.Telegram.Token = strings.TrimSpace(token)
+	cfg.Channels.Telegram.AllowFrom = normalizeAllowFrom([]string{allowListInput})
+	return nil
+}
+
+func applyExplicitTelegramOnboardingOverrides(cfg *Config, opts OnboardingOptions) {
+	if opts.TelegramEnabledSet {
+		cfg.Channels.Telegram.Enabled = opts.TelegramEnabled
+	}
+	if opts.TelegramTokenSet {
+		cfg.Channels.Telegram.Token = strings.TrimSpace(opts.TelegramToken)
+	}
+	if opts.TelegramAllowFromSet {
+		cfg.Channels.Telegram.AllowFrom = normalizeAllowFrom(opts.TelegramAllowFrom)
+	}
+}
+
+func validateTelegramOnboarding(cfg Config) error {
+	if cfg.Channels.Telegram.Enabled && strings.TrimSpace(cfg.Channels.Telegram.Token) == "" {
+		return fmt.Errorf("telegram enabled requires token")
+	}
 	return nil
 }
 
@@ -400,6 +476,26 @@ func defaultString(value, fallback string) string {
 		return trimmed
 	}
 	return strings.TrimSpace(fallback)
+}
+
+func normalizeAllowFrom(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		for _, part := range strings.Split(value, ",") {
+			trimmed := strings.TrimSpace(part)
+			if trimmed == "" {
+				continue
+			}
+			key := strings.ToLower(strings.TrimPrefix(trimmed, "@"))
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }
 
 func readerOrStdin(in io.Reader) io.Reader {

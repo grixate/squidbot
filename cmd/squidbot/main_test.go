@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -179,6 +180,46 @@ func TestOnboardCommandPrintsBanner(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), ".oooo.o") {
 		t.Fatalf("expected banner output for onboard, got: %q", out.String())
+	}
+}
+
+func TestOnboardCommandPersistsTelegramFlagsNonInteractive(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	configPath := writeTestConfig(t, baseTestConfig(t))
+
+	onboard := onboardCmd(configPath)
+	onboard.SilenceUsage = true
+	onboard.SilenceErrors = true
+	onboard.SetOut(io.Discard)
+	onboard.SetErr(io.Discard)
+	onboard.SetArgs([]string{
+		"--non-interactive",
+		"--provider", "gemini",
+		"--api-key", "sk-gemini",
+		"--model", "gemini-3.0-pro",
+		"--telegram-enabled",
+		"--telegram-token", "bot-token",
+		"--telegram-allow-from", "123,@alice",
+		"--telegram-allow-from", "@Alice",
+	})
+
+	if err := onboard.Execute(); err != nil {
+		t.Fatalf("onboard should succeed: %v", err)
+	}
+
+	loaded, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+	if !loaded.Channels.Telegram.Enabled {
+		t.Fatal("expected telegram to be enabled")
+	}
+	if loaded.Channels.Telegram.Token != "bot-token" {
+		t.Fatalf("unexpected telegram token: %q", loaded.Channels.Telegram.Token)
+	}
+	wantAllow := []string{"123", "@alice"}
+	if !reflect.DeepEqual(loaded.Channels.Telegram.AllowFrom, wantAllow) {
+		t.Fatalf("unexpected telegram allow list: %#v", loaded.Channels.Telegram.AllowFrom)
 	}
 }
 

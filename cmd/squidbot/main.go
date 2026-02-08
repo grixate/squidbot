@@ -46,7 +46,7 @@ func newRootCmd(logger *log.Logger) *cobra.Command {
 	root := &cobra.Command{
 		Use:   "squidbot",
 		Short: "squidbot - Go-native personal AI assistant",
-		RunE: func(cmd *cobra.Command, args []string) error { return cmd.Help() },
+		RunE:  func(cmd *cobra.Command, args []string) error { return cmd.Help() },
 	}
 	root.PersistentFlags().StringVar(&configPath, "config", "", "config file path")
 
@@ -90,6 +90,9 @@ func onboardCmd(configPath string) *cobra.Command {
 	var model string
 	var nonInteractive bool
 	var verifyGeminiCLI bool
+	var telegramEnabled bool
+	var telegramToken string
+	var telegramAllowFrom []string
 
 	cmd := &cobra.Command{
 		Use:   "onboard",
@@ -101,14 +104,20 @@ func onboardCmd(configPath string) *cobra.Command {
 				return err
 			}
 			result, err := config.RunOnboarding(cmd.Context(), cfg, config.OnboardingOptions{
-				Provider:        providerName,
-				APIKey:          apiKey,
-				APIBase:         apiBase,
-				Model:           model,
-				NonInteractive:  nonInteractive,
-				VerifyGeminiCLI: verifyGeminiCLI,
-				In:              cmd.InOrStdin(),
-				Out:             cmd.OutOrStdout(),
+				Provider:             providerName,
+				APIKey:               apiKey,
+				APIBase:              apiBase,
+				Model:                model,
+				NonInteractive:       nonInteractive,
+				VerifyGeminiCLI:      verifyGeminiCLI,
+				TelegramEnabledSet:   cmd.Flags().Changed("telegram-enabled"),
+				TelegramEnabled:      telegramEnabled,
+				TelegramTokenSet:     cmd.Flags().Changed("telegram-token"),
+				TelegramToken:        telegramToken,
+				TelegramAllowFromSet: cmd.Flags().Changed("telegram-allow-from"),
+				TelegramAllowFrom:    telegramAllowFrom,
+				In:                   cmd.InOrStdin(),
+				Out:                  cmd.OutOrStdout(),
 			})
 			if err != nil {
 				return err
@@ -138,6 +147,9 @@ func onboardCmd(configPath string) *cobra.Command {
 	cmd.Flags().StringVar(&model, "model", "", "Provider model")
 	cmd.Flags().BoolVar(&nonInteractive, "non-interactive", false, "Disable prompts and require explicit inputs")
 	cmd.Flags().BoolVar(&verifyGeminiCLI, "verify-gemini-cli", false, "Verify Gemini CLI connectivity during onboarding")
+	cmd.Flags().BoolVar(&telegramEnabled, "telegram-enabled", false, "Enable Telegram channel")
+	cmd.Flags().StringVar(&telegramToken, "telegram-token", "", "Telegram bot token")
+	cmd.Flags().StringSliceVar(&telegramAllowFrom, "telegram-allow-from", nil, "Telegram allow list entry (repeatable or comma-separated)")
 	return cmd
 }
 
