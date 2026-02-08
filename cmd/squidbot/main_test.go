@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"io"
 	"log"
 	"path/filepath"
@@ -132,5 +133,60 @@ func TestOnboardStatusDoctorCommandsRemainRunnable(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "doctor checks failed") {
 		t.Fatalf("unexpected doctor error: %v", err)
+	}
+}
+
+func TestRootCommandPrintsBannerOnNoArgs(t *testing.T) {
+	cmd := newRootCmd(log.New(io.Discard, "", 0))
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("root command should run: %v", err)
+	}
+	output := out.String()
+	if !strings.Contains(output, ".oooo.o") {
+		t.Fatalf("expected banner output, got: %q", output)
+	}
+	if !strings.Contains(output, "Usage:") {
+		t.Fatalf("expected root help output, got: %q", output)
+	}
+}
+
+func TestRootCommandPrintsBannerOnRootHelp(t *testing.T) {
+	cmd := newRootCmd(log.New(io.Discard, "", 0))
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{"--help"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("root help should run: %v", err)
+	}
+	if !strings.Contains(out.String(), ".oooo.o") {
+		t.Fatalf("expected banner output for root help, got: %q", out.String())
+	}
+}
+
+func TestRootCommandDoesNotPrintBannerForSubcommand(t *testing.T) {
+	cmd := newRootCmd(log.New(io.Discard, "", 0))
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{"doctor", "--help"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("subcommand help should run: %v", err)
+	}
+	if strings.Contains(out.String(), ".oooo.o") {
+		t.Fatalf("did not expect banner output for subcommand, got: %q", out.String())
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -20,13 +21,32 @@ import (
 	storepkg "github.com/grixate/squidbot/internal/storage/bbolt"
 )
 
+const squidbotRomanBanner = "                                 o8o        .o8   .o8                     .\n" +
+	"                                 `\"'       \"888  \"888                   .o8\n" +
+	" .oooo.o  .ooooo oo oooo  oooo  oooo   .oooo888   888oooo.   .ooooo.  .o888oo\n" +
+	"d88(  \"8 d88' `888  `888  `888  `888  d88' `888   d88' `88b d88' `88b   888\n" +
+	"`\"Y88b.  888   888   888   888   888  888   888   888   888 888   888   888\n" +
+	"o.  )88b 888   888   888   888   888  888   888   888   888 888   888   888 .\n" +
+	"8\"\"888P' `V8bod888   `V88V\"V8P' o888o `Y8bod88P\"  `Y8bod8P' `Y8bod8P'   \"888\"\n" +
+	"               888.\n" +
+	"               8P'\n" +
+	"               \""
+
 func main() {
 	logger := log.New(os.Stderr, "", log.LstdFlags)
+	root := newRootCmd(logger)
+	if err := root.Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
 
+func newRootCmd(logger *log.Logger) *cobra.Command {
 	var configPath string
 	root := &cobra.Command{
 		Use:   "squidbot",
 		Short: "squidbot - Go-native personal AI assistant",
+		RunE: func(cmd *cobra.Command, args []string) error { return cmd.Help() },
 	}
 	root.PersistentFlags().StringVar(&configPath, "config", "", "config file path")
 
@@ -37,11 +57,18 @@ func main() {
 	root.AddCommand(telegramCmd(configPath))
 	root.AddCommand(cronCmd(configPath, logger))
 	root.AddCommand(doctorCmd(configPath))
+	defaultHelp := root.HelpFunc()
+	root.SetHelpFunc(func(cmd *cobra.Command, args []string) {
+		if cmd == root {
+			printBanner(cmd.OutOrStdout())
+		}
+		defaultHelp(cmd, args)
+	})
+	return root
+}
 
-	if err := root.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
+func printBanner(w io.Writer) {
+	fmt.Fprintln(w, squidbotRomanBanner)
 }
 
 func resolvedConfigPath(path string) string {
