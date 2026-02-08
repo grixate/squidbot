@@ -57,13 +57,6 @@ func newRootCmd(logger *log.Logger) *cobra.Command {
 	root.AddCommand(telegramCmd(configPath))
 	root.AddCommand(cronCmd(configPath, logger))
 	root.AddCommand(doctorCmd(configPath))
-	defaultHelp := root.HelpFunc()
-	root.SetHelpFunc(func(cmd *cobra.Command, args []string) {
-		if cmd == root {
-			printBanner(cmd.OutOrStdout())
-		}
-		defaultHelp(cmd, args)
-	})
 	return root
 }
 
@@ -102,6 +95,7 @@ func onboardCmd(configPath string) *cobra.Command {
 		Use:   "onboard",
 		Short: "Initialize squidbot config and workspace",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			printBanner(cmd.OutOrStdout())
 			cfg, err := loadCfg(configPath)
 			if err != nil {
 				return err

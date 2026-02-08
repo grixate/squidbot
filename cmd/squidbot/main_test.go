@@ -136,7 +136,7 @@ func TestOnboardStatusDoctorCommandsRemainRunnable(t *testing.T) {
 	}
 }
 
-func TestRootCommandPrintsBannerOnNoArgs(t *testing.T) {
+func TestRootCommandDoesNotPrintBannerOnNoArgs(t *testing.T) {
 	cmd := newRootCmd(log.New(io.Discard, "", 0))
 	cmd.SilenceUsage = true
 	cmd.SilenceErrors = true
@@ -149,15 +149,40 @@ func TestRootCommandPrintsBannerOnNoArgs(t *testing.T) {
 		t.Fatalf("root command should run: %v", err)
 	}
 	output := out.String()
-	if !strings.Contains(output, ".oooo.o") {
-		t.Fatalf("expected banner output, got: %q", output)
+	if strings.Contains(output, ".oooo.o") {
+		t.Fatalf("did not expect banner output, got: %q", output)
 	}
 	if !strings.Contains(output, "Usage:") {
 		t.Fatalf("expected root help output, got: %q", output)
 	}
 }
 
-func TestRootCommandPrintsBannerOnRootHelp(t *testing.T) {
+func TestOnboardCommandPrintsBanner(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	configPath := writeTestConfig(t, baseTestConfig(t))
+
+	onboard := onboardCmd(configPath)
+	onboard.SilenceUsage = true
+	onboard.SilenceErrors = true
+	var out bytes.Buffer
+	onboard.SetOut(&out)
+	onboard.SetErr(io.Discard)
+	onboard.SetArgs([]string{
+		"--non-interactive",
+		"--provider", "gemini",
+		"--api-key", "sk-gemini",
+		"--model", "gemini-3.0-pro",
+	})
+
+	if err := onboard.Execute(); err != nil {
+		t.Fatalf("onboard should succeed: %v", err)
+	}
+	if !strings.Contains(out.String(), ".oooo.o") {
+		t.Fatalf("expected banner output for onboard, got: %q", out.String())
+	}
+}
+
+func TestRootCommandDoesNotPrintBannerOnRootHelp(t *testing.T) {
 	cmd := newRootCmd(log.New(io.Discard, "", 0))
 	cmd.SilenceUsage = true
 	cmd.SilenceErrors = true
@@ -169,8 +194,8 @@ func TestRootCommandPrintsBannerOnRootHelp(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("root help should run: %v", err)
 	}
-	if !strings.Contains(out.String(), ".oooo.o") {
-		t.Fatalf("expected banner output for root help, got: %q", out.String())
+	if strings.Contains(out.String(), ".oooo.o") {
+		t.Fatalf("did not expect banner output for root help, got: %q", out.String())
 	}
 }
 
