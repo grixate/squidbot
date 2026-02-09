@@ -1,16 +1,19 @@
 # squidbot
 
-Go-native personal AI assistant with Telegram integration, actor-based session runtime, and BoltDB persistence.
+Go-native personal AI assistant with Telegram integration, actor-based session runtime, BoltDB persistence, and a SQLite memory index sidecar.
 
 ## Features
 
 - Session actor runtime with bounded mailboxes and idle eviction
 - BoltDB primary storage (`~/.squidbot/data/squidbot.db`)
+- SQLite memory index for markdown-based retrieval (`~/.squidbot/data/memory_index.db`)
 - Tool loop with typed tool argument boundaries
 - Provider adapters for OpenRouter, Anthropic, OpenAI, Gemini, Ollama, and LM Studio
 - Mandatory provider-gated onboarding before runtime commands
 - Telegram channel adapter (polling)
 - Cron scheduler and heartbeat service
+- Auto-discovered skill contracts from `skills/**/SKILL.md`
+- Episodic daily memory logs in `memory/daily/YYYY-MM-DD.md`
 - Structured runtime metrics counters
 
 ## Install
@@ -39,6 +42,27 @@ go build -o squidbot ./cmd/squidbot
 ```bash
 ./squidbot gateway
 ```
+
+## Workspace Contract
+
+Onboarding scaffolds these markdown files in your workspace:
+
+- `AGENTS.md`
+- `SOUL.md`
+- `USER.md`
+- `TOOLS.md`
+- `HEARTBEAT.md`
+- `memory/MEMORY.md`
+- `memory/daily/` (episodic logs)
+- `skills/README.md` and optional `skills/**/SKILL.md`
+
+Prompt assembly includes:
+
+- bootstrap markdown (`AGENTS.md`, `SOUL.md`, `USER.md`, `TOOLS.md`)
+- curated memory (`memory/MEMORY.md`)
+- indexed retrieval snippets from memory markdown files
+- recent daily memory snippets
+- discovered skill summaries
 
 ## Non-Interactive Onboarding
 

@@ -13,6 +13,7 @@ import (
 	"github.com/oklog/ulid/v2"
 
 	"github.com/grixate/squidbot/internal/config"
+	"github.com/grixate/squidbot/internal/memory"
 	"github.com/grixate/squidbot/internal/provider"
 	"github.com/grixate/squidbot/internal/runtime/actor"
 	"github.com/grixate/squidbot/internal/telemetry"
@@ -38,6 +39,7 @@ type Engine struct {
 	actors   *actor.System
 	outbound chan OutboundMessage
 	policy   *tools.PathPolicy
+	memory   *memory.Manager
 	ulidMu   sync.Mutex
 	entropy  *ulid.MonotonicEntropy
 }
@@ -66,6 +68,7 @@ func NewEngine(cfg config.Config, providerClient provider.LLMProvider, model str
 		log:      logger,
 		outbound: make(chan OutboundMessage, 512),
 		policy:   policy,
+		memory:   memory.NewManager(cfg),
 		entropy:  ulid.Monotonic(mrand.New(mrand.NewSource(time.Now().UnixNano())), 0),
 	}
 	system := actor.NewSystem(engine.newSessionHandler, cfg.Runtime.MailboxSize, cfg.Runtime.ActorIdleTTL.Duration)
@@ -197,7 +200,7 @@ func (h *sessionHandler) process(ctx context.Context, msg InboundMessage) (strin
 	if err != nil {
 		return "", err
 	}
-	systemPrompt := buildSystemPrompt(h.engine.cfg)
+	systemPrompt := buildSystemPrompt(h.engine.cfg, msg.Content)
 	messages := buildMessages(systemPrompt, history, msg.Content)
 	registry, err := h.engine.buildRegistry(msg)
 	if err != nil {
@@ -273,7 +276,76 @@ func (h *sessionHandler) process(ctx context.Context, msg InboundMessage) (strin
 	if msg.Channel != "cli" {
 		h.engine.send(msg.Channel, msg.ChatID, finalContent, map[string]interface{}{"session_id": msg.SessionID})
 	}
+	h.engine.appendDailyMemory(turnCtx, msg, finalContent)
 	return finalContent, nil
+}
+
+func (e *Engine) appendDailyMemory(ctx context.Context, msg InboundMessage, response string) {
+	if e.memory == nil || !e.memory.Enabled() {
+		return
+	}
+	intent := msg.Content
+	if len(intent) > 240 {
+		intent = intent[:237] + "..."
+	}
+	outcome := response
+	if len(outcome) > 320 {
+		outcome = outcome[:317] + "..."
+	}
+	followUp := suggestsFollowUp(response)
+	if err := e.memory.AppendDailyLog(ctx, memory.DailyEntry{
+		Time:      time.Now().UTC(),
+		Source:    "conversation",
+		SessionID: msg.SessionID,
+		Intent:    intent,
+		Outcome:   outcome,
+		FollowUp:  followUp,
+	}); err != nil {
+		e.log.Printf("failed to append daily memory: %v", err)
+	}
+}
+
+func (e *Engine) RecordHeartbeat(ctx context.Context, prompt, response string) {
+	if e.memory == nil || !e.memory.Enabled() {
+		return
+	}
+	intent := prompt
+	if len(intent) > 240 {
+		intent = intent[:237] + "..."
+	}
+	outcome := response
+	if len(outcome) > 320 {
+		outcome = outcome[:317] + "..."
+	}
+	if err := e.memory.AppendDailyLog(ctx, memory.DailyEntry{
+		Time:      time.Now().UTC(),
+		Source:    "heartbeat",
+		SessionID: "system:heartbeat",
+		Intent:    intent,
+		Outcome:   outcome,
+		FollowUp:  suggestsFollowUp(response),
+	}); err != nil {
+		e.log.Printf("failed to append heartbeat memory: %v", err)
+	}
+}
+
+func suggestsFollowUp(content string) bool {
+	lower := strings.ToLower(content)
+	markers := []string{
+		"follow-up",
+		"follow up",
+		"waiting on",
+		"blocked",
+		"next step",
+		"need input",
+		"action required",
+	}
+	for _, marker := range markers {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *Engine) buildRegistry(msg InboundMessage) (*tools.Registry, error) {

@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -18,6 +19,8 @@ import (
 	"github.com/grixate/squidbot/internal/app"
 	"github.com/grixate/squidbot/internal/config"
 	"github.com/grixate/squidbot/internal/cron"
+	"github.com/grixate/squidbot/internal/memory"
+	"github.com/grixate/squidbot/internal/skills"
 	storepkg "github.com/grixate/squidbot/internal/storage/bbolt"
 )
 
@@ -79,6 +82,12 @@ func loadCfg(path string) (config.Config, error) {
 	cfg.Agents.Defaults.Workspace = config.WorkspacePath(cfg)
 	if cfg.Storage.DBPath == "" {
 		cfg.Storage.DBPath = config.DataRoot() + "/squidbot.db"
+	}
+	if strings.TrimSpace(cfg.Memory.IndexPath) == "" {
+		cfg.Memory.IndexPath = filepath.Join(config.DataRoot(), "memory_index.db")
+	}
+	if len(cfg.Skills.Paths) == 0 {
+		cfg.Skills.Paths = []string{filepath.Join(cfg.Agents.Defaults.Workspace, "skills")}
 	}
 	return cfg, nil
 }
@@ -486,6 +495,32 @@ func doctorCmd(configPath string) *cobra.Command {
 			}
 			if cfg.Channels.Telegram.Enabled && strings.TrimSpace(cfg.Channels.Telegram.Token) == "" {
 				problems = append(problems, "Telegram enabled but token missing")
+			}
+			workspace := config.WorkspacePath(cfg)
+			required := []string{
+				filepath.Join(workspace, "AGENTS.md"),
+				filepath.Join(workspace, "SOUL.md"),
+				filepath.Join(workspace, "USER.md"),
+				filepath.Join(workspace, "TOOLS.md"),
+				filepath.Join(workspace, "HEARTBEAT.md"),
+				filepath.Join(workspace, "memory", "MEMORY.md"),
+			}
+			for _, path := range required {
+				if _, statErr := os.Stat(path); statErr != nil {
+					problems = append(problems, "missing workspace file: "+path)
+				}
+			}
+			if _, readErr := os.ReadFile(filepath.Join(workspace, "HEARTBEAT.md")); readErr != nil {
+				problems = append(problems, "heartbeat file not readable: "+readErr.Error())
+			}
+			mem := memory.NewManager(cfg)
+			if err := mem.EnsureIndex(cmd.Context()); err != nil {
+				problems = append(problems, "memory index unavailable: "+err.Error())
+			}
+			discovery := skills.Discover(cfg)
+			fmt.Printf("Skills discovered: %d\n", len(discovery.Skills))
+			for _, warning := range discovery.Warnings {
+				fmt.Printf("Skill warning: %s\n", warning)
 			}
 			if len(problems) == 0 {
 				fmt.Println("Doctor checks passed")

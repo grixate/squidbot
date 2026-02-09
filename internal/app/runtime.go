@@ -69,7 +69,7 @@ func BuildRuntime(cfg config.Config, logger *log.Logger) (*Runtime, error) {
 	}, metrics)
 
 	runtime.Heartbeat = heartbeat.NewService(config.WorkspacePath(cfg), time.Duration(cfg.Runtime.HeartbeatIntervalSec)*time.Second, func(ctx context.Context, prompt string) (string, error) {
-		return engine.Ask(ctx, agent.InboundMessage{
+		response, err := engine.Ask(ctx, agent.InboundMessage{
 			SessionID: "system:heartbeat",
 			RequestID: "",
 			Channel:   "system",
@@ -78,6 +78,10 @@ func BuildRuntime(cfg config.Config, logger *log.Logger) (*Runtime, error) {
 			Content:   prompt,
 			CreatedAt: time.Now().UTC(),
 		})
+		if err == nil {
+			engine.RecordHeartbeat(ctx, prompt, response)
+		}
+		return response, err
 	}, metrics)
 
 	if cfg.Channels.Telegram.Enabled {

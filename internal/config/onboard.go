@@ -57,6 +57,16 @@ This file is checked periodically by squidbot.
 
 <!-- Add periodic tasks below -->
 `,
+	"skills/README.md": `# Skills
+
+Place custom skills under this directory.
+
+Each skill should include a SKILL.md contract file, for example:
+
+skills/
+  my-skill/
+    SKILL.md
+`,
 }
 
 const memoryTemplate = `# Long-term Memory
@@ -84,11 +94,18 @@ func EnsureFilesystem(cfg Config) error {
 	if err := os.MkdirAll(memoryDir, 0o755); err != nil {
 		return err
 	}
+	memoryDailyDir := filepath.Join(memoryDir, "daily")
+	if err := os.MkdirAll(memoryDailyDir, 0o755); err != nil {
+		return err
+	}
 
 	for name, content := range workspaceTemplates {
 		path := filepath.Join(workspace, name)
 		if _, err := os.Stat(path); err == nil {
 			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return err
 		}
 		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 			return err

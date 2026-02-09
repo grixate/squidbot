@@ -18,6 +18,8 @@ type Config struct {
 	Gateway   GatewayConfig   `json:"gateway"`
 	Storage   StorageConfig   `json:"storage"`
 	Runtime   RuntimeConfig   `json:"runtime"`
+	Memory    MemoryConfig    `json:"memory"`
+	Skills    SkillsConfig    `json:"skills"`
 }
 
 type AgentsConfig struct {
@@ -87,6 +89,19 @@ type RuntimeConfig struct {
 	MailboxSize          int           `json:"mailboxSize"`
 	ActorIdleTTL         DurationValue `json:"actorIdleTtl"`
 	HeartbeatIntervalSec int           `json:"heartbeatIntervalSec"`
+}
+
+type MemoryConfig struct {
+	Enabled            bool   `json:"enabled"`
+	IndexPath          string `json:"indexPath"`
+	TopK               int    `json:"topK"`
+	RecencyDays        int    `json:"recencyDays"`
+	EmbeddingsProvider string `json:"embeddingsProvider"`
+	EmbeddingsModel    string `json:"embeddingsModel"`
+}
+
+type SkillsConfig struct {
+	Paths []string `json:"paths"`
 }
 
 type DurationValue struct {
@@ -177,6 +192,17 @@ func Default() Config {
 			ActorIdleTTL:         DurationValue{Duration: 15 * time.Minute},
 			HeartbeatIntervalSec: 1800,
 		},
+		Memory: MemoryConfig{
+			Enabled:            true,
+			IndexPath:          filepath.Join(home, "data", "memory_index.db"),
+			TopK:               8,
+			RecencyDays:        30,
+			EmbeddingsProvider: "none",
+			EmbeddingsModel:    "",
+		},
+		Skills: SkillsConfig{
+			Paths: []string{filepath.Join(workspace, "skills")},
+		},
 	}
 }
 
@@ -251,26 +277,29 @@ func Save(path string, cfg Config) error {
 
 func applyEnvOverrides(cfg *Config) {
 	env := map[string]*string{
-		"SQUIDBOT_PROVIDER_ACTIVE":     &cfg.Providers.Active,
-		"SQUIDBOT_OPENROUTER_API_KEY":  &cfg.Providers.OpenRouter.APIKey,
-		"SQUIDBOT_OPENROUTER_API_BASE": &cfg.Providers.OpenRouter.APIBase,
-		"SQUIDBOT_OPENROUTER_MODEL":    &cfg.Providers.OpenRouter.Model,
-		"SQUIDBOT_ANTHROPIC_API_KEY":   &cfg.Providers.Anthropic.APIKey,
-		"SQUIDBOT_ANTHROPIC_MODEL":     &cfg.Providers.Anthropic.Model,
-		"SQUIDBOT_OPENAI_API_KEY":      &cfg.Providers.OpenAI.APIKey,
-		"SQUIDBOT_OPENAI_API_BASE":     &cfg.Providers.OpenAI.APIBase,
-		"SQUIDBOT_OPENAI_MODEL":        &cfg.Providers.OpenAI.Model,
-		"SQUIDBOT_GEMINI_API_KEY":      &cfg.Providers.Gemini.APIKey,
-		"SQUIDBOT_GEMINI_API_BASE":     &cfg.Providers.Gemini.APIBase,
-		"SQUIDBOT_GEMINI_MODEL":        &cfg.Providers.Gemini.Model,
-		"SQUIDBOT_OLLAMA_API_KEY":      &cfg.Providers.Ollama.APIKey,
-		"SQUIDBOT_OLLAMA_API_BASE":     &cfg.Providers.Ollama.APIBase,
-		"SQUIDBOT_OLLAMA_MODEL":        &cfg.Providers.Ollama.Model,
-		"SQUIDBOT_LMSTUDIO_API_KEY":    &cfg.Providers.LMStudio.APIKey,
-		"SQUIDBOT_LMSTUDIO_API_BASE":   &cfg.Providers.LMStudio.APIBase,
-		"SQUIDBOT_LMSTUDIO_MODEL":      &cfg.Providers.LMStudio.Model,
-		"SQUIDBOT_TELEGRAM_TOKEN":      &cfg.Channels.Telegram.Token,
-		"SQUIDBOT_BRAVE_API_KEY":       &cfg.Tools.Web.Search.APIKey,
+		"SQUIDBOT_PROVIDER_ACTIVE":            &cfg.Providers.Active,
+		"SQUIDBOT_OPENROUTER_API_KEY":         &cfg.Providers.OpenRouter.APIKey,
+		"SQUIDBOT_OPENROUTER_API_BASE":        &cfg.Providers.OpenRouter.APIBase,
+		"SQUIDBOT_OPENROUTER_MODEL":           &cfg.Providers.OpenRouter.Model,
+		"SQUIDBOT_ANTHROPIC_API_KEY":          &cfg.Providers.Anthropic.APIKey,
+		"SQUIDBOT_ANTHROPIC_MODEL":            &cfg.Providers.Anthropic.Model,
+		"SQUIDBOT_OPENAI_API_KEY":             &cfg.Providers.OpenAI.APIKey,
+		"SQUIDBOT_OPENAI_API_BASE":            &cfg.Providers.OpenAI.APIBase,
+		"SQUIDBOT_OPENAI_MODEL":               &cfg.Providers.OpenAI.Model,
+		"SQUIDBOT_GEMINI_API_KEY":             &cfg.Providers.Gemini.APIKey,
+		"SQUIDBOT_GEMINI_API_BASE":            &cfg.Providers.Gemini.APIBase,
+		"SQUIDBOT_GEMINI_MODEL":               &cfg.Providers.Gemini.Model,
+		"SQUIDBOT_OLLAMA_API_KEY":             &cfg.Providers.Ollama.APIKey,
+		"SQUIDBOT_OLLAMA_API_BASE":            &cfg.Providers.Ollama.APIBase,
+		"SQUIDBOT_OLLAMA_MODEL":               &cfg.Providers.Ollama.Model,
+		"SQUIDBOT_LMSTUDIO_API_KEY":           &cfg.Providers.LMStudio.APIKey,
+		"SQUIDBOT_LMSTUDIO_API_BASE":          &cfg.Providers.LMStudio.APIBase,
+		"SQUIDBOT_LMSTUDIO_MODEL":             &cfg.Providers.LMStudio.Model,
+		"SQUIDBOT_TELEGRAM_TOKEN":             &cfg.Channels.Telegram.Token,
+		"SQUIDBOT_BRAVE_API_KEY":              &cfg.Tools.Web.Search.APIKey,
+		"SQUIDBOT_MEMORY_INDEX_PATH":          &cfg.Memory.IndexPath,
+		"SQUIDBOT_MEMORY_EMBEDDINGS_PROVIDER": &cfg.Memory.EmbeddingsProvider,
+		"SQUIDBOT_MEMORY_EMBEDDINGS_MODEL":    &cfg.Memory.EmbeddingsModel,
 	}
 	for key, target := range env {
 		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
@@ -282,6 +311,37 @@ func applyEnvOverrides(cfg *Config) {
 		parsed, err := strconv.ParseBool(value)
 		if err == nil {
 			cfg.Channels.Telegram.Enabled = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_MEMORY_ENABLED")); value != "" {
+		parsed, err := strconv.ParseBool(value)
+		if err == nil {
+			cfg.Memory.Enabled = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_MEMORY_TOPK")); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err == nil && parsed > 0 {
+			cfg.Memory.TopK = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_MEMORY_RECENCY_DAYS")); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err == nil && parsed > 0 {
+			cfg.Memory.RecencyDays = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_SKILLS_PATHS")); value != "" {
+		paths := strings.Split(value, ",")
+		out := make([]string, 0, len(paths))
+		for _, path := range paths {
+			path = strings.TrimSpace(path)
+			if path != "" {
+				out = append(out, path)
+			}
+		}
+		if len(out) > 0 {
+			cfg.Skills.Paths = out
 		}
 	}
 }

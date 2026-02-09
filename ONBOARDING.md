@@ -15,6 +15,13 @@ The CLI will ask you to:
 - optionally configure Telegram (`enabled`, `token`, allow list)
 - optionally verify Gemini CLI connectivity for Gemini
 
+Onboarding also ensures workspace scaffolding for:
+
+- `AGENTS.md`, `SOUL.md`, `USER.md`, `TOOLS.md`, `HEARTBEAT.md`
+- `memory/MEMORY.md`
+- `memory/daily/` (episodic logs)
+- `skills/README.md` (drop custom `skills/**/SKILL.md` contracts here)
+
 ## Non-Interactive Setup
 
 Gemini:
@@ -47,6 +54,15 @@ Telegram flags:
 ./squidbot status
 ./squidbot doctor
 ```
+
+`doctor` now validates:
+
+- active provider readiness
+- Telegram token consistency when Telegram is enabled
+- required markdown workspace files
+- heartbeat file readability
+- memory index accessibility
+- discovered skill contract count
 
 If provider setup is incomplete, runtime commands will fail with:
 
