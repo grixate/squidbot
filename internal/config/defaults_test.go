@@ -24,6 +24,9 @@ func TestDefaultIncludesMemoryAndSkillsSettings(t *testing.T) {
 	if len(cfg.Skills.Paths) != 1 {
 		t.Fatalf("unexpected skills paths defaults: %#v", cfg.Skills.Paths)
 	}
+	if cfg.Management.Host != "127.0.0.1" || cfg.Management.Port != 18790 {
+		t.Fatalf("unexpected management defaults: %#v", cfg.Management)
+	}
 }
 
 func TestLoadBackfillsMissingMemoryAndSkillsFields(t *testing.T) {
@@ -43,5 +46,8 @@ func TestLoadBackfillsMissingMemoryAndSkillsFields(t *testing.T) {
 	}
 	if len(cfg.Skills.Paths) == 0 {
 		t.Fatal("expected skills paths defaults to be backfilled")
+	}
+	if cfg.Management.Port != 18790 {
+		t.Fatalf("expected management defaults to be backfilled, got %#v", cfg.Management)
 	}
 }

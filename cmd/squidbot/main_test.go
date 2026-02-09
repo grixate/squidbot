@@ -256,3 +256,23 @@ func TestRootCommandDoesNotPrintBannerForSubcommand(t *testing.T) {
 		t.Fatalf("did not expect banner output for subcommand, got: %q", out.String())
 	}
 }
+
+func TestResolveOnboardingModePrompt(t *testing.T) {
+	mode, err := resolveOnboardingMode(strings.NewReader("2\n"), io.Discard, "", false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mode != "web" {
+		t.Fatalf("expected web mode, got %q", mode)
+	}
+}
+
+func TestResolveOnboardingModeNonInteractiveDefaultsToCLI(t *testing.T) {
+	mode, err := resolveOnboardingMode(strings.NewReader(""), io.Discard, "", true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mode != "cli" {
+		t.Fatalf("expected cli mode, got %q", mode)
+	}
+}

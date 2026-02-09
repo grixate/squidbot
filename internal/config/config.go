@@ -11,15 +11,17 @@ import (
 )
 
 type Config struct {
-	Agents    AgentsConfig    `json:"agents"`
-	Providers ProvidersConfig `json:"providers"`
-	Channels  ChannelsConfig  `json:"channels"`
-	Tools     ToolsConfig     `json:"tools"`
-	Gateway   GatewayConfig   `json:"gateway"`
-	Storage   StorageConfig   `json:"storage"`
-	Runtime   RuntimeConfig   `json:"runtime"`
-	Memory    MemoryConfig    `json:"memory"`
-	Skills    SkillsConfig    `json:"skills"`
+	Agents     AgentsConfig     `json:"agents"`
+	Providers  ProvidersConfig  `json:"providers"`
+	Channels   ChannelsConfig   `json:"channels"`
+	Tools      ToolsConfig      `json:"tools"`
+	Gateway    GatewayConfig    `json:"gateway"`
+	Management ManagementConfig `json:"management"`
+	Auth       AuthConfig       `json:"auth"`
+	Storage    StorageConfig    `json:"storage"`
+	Runtime    RuntimeConfig    `json:"runtime"`
+	Memory     MemoryConfig     `json:"memory"`
+	Skills     SkillsConfig     `json:"skills"`
 }
 
 type AgentsConfig struct {
@@ -78,6 +80,18 @@ type WebSearchConfig struct {
 type GatewayConfig struct {
 	Host string `json:"host"`
 	Port int    `json:"port"`
+}
+
+type ManagementConfig struct {
+	Host           string `json:"host"`
+	Port           int    `json:"port"`
+	PublicBaseURL  string `json:"publicBaseUrl"`
+	ServeInGateway bool   `json:"serveInGateway"`
+}
+
+type AuthConfig struct {
+	PasswordHash      string `json:"passwordHash"`
+	PasswordUpdatedAt string `json:"passwordUpdatedAt,omitempty"`
 }
 
 type StorageConfig struct {
@@ -183,6 +197,13 @@ func Default() Config {
 			Host: "0.0.0.0",
 			Port: 18789,
 		},
+		Management: ManagementConfig{
+			Host:           "127.0.0.1",
+			Port:           18790,
+			PublicBaseURL:  "",
+			ServeInGateway: false,
+		},
+		Auth: AuthConfig{},
 		Storage: StorageConfig{
 			Backend: "bbolt",
 			DBPath:  filepath.Join(home, "data", "squidbot.db"),
@@ -482,6 +503,31 @@ func ValidateActiveProvider(cfg Config) error {
 		return fmt.Errorf("unsupported provider %q", normalized)
 	}
 	return validateProviderConfig(normalized, provider)
+}
+
+func IsSetupComplete(cfg Config) bool {
+	if strings.TrimSpace(cfg.Auth.PasswordHash) == "" {
+		return false
+	}
+	if err := ValidateActiveProvider(cfg); err != nil {
+		return false
+	}
+	return validateTelegramOnboarding(cfg) == nil
+}
+
+func ProviderRequirements(name string) (requiresAPIKey, requiresModel bool, ok bool) {
+	normalized, ok := NormalizeProviderName(name)
+	if !ok {
+		return false, false, false
+	}
+	switch normalized {
+	case ProviderOpenRouter, ProviderAnthropic, ProviderOpenAI, ProviderGemini:
+		return true, false, true
+	case ProviderOllama, ProviderLMStudio:
+		return false, true, true
+	default:
+		return false, false, false
+	}
 }
 
 func validateProviderConfig(name string, provider ProviderConfig) error {

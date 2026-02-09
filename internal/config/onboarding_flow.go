@@ -60,30 +60,19 @@ func RunOnboarding(ctx context.Context, cfg Config, opts OnboardingOptions) (Onb
 		return OnboardingResult{}, err
 	}
 
-	if strings.TrimSpace(providerCfg.APIBase) == "" {
-		if base := ProviderDefaultAPIBase(providerName); base != "" {
-			providerCfg.APIBase = base
-		}
-	}
-	if strings.TrimSpace(providerCfg.Model) == "" {
-		if model := ProviderDefaultModel(providerName); model != "" {
-			providerCfg.Model = model
-		}
-	}
-
-	cfg.Providers.Active = providerName
-	_ = cfg.SetProviderByName(providerName, providerCfg)
-
 	if err := fillOnboardingTelegramConfig(&cfg, opts, reader, out); err != nil {
 		return OnboardingResult{}, err
 	}
 
-	if err := ValidateActiveProvider(cfg); err != nil {
+	nextCfg, err := ApplyOnboardingInput(cfg, OnboardingInput{
+		Provider:       providerName,
+		ProviderConfig: providerCfg,
+		Telegram:       cfg.Channels.Telegram,
+	})
+	if err != nil {
 		return OnboardingResult{}, err
 	}
-	if err := validateTelegramOnboarding(cfg); err != nil {
-		return OnboardingResult{}, err
-	}
+	cfg = nextCfg
 
 	result := OnboardingResult{
 		Config:   cfg,

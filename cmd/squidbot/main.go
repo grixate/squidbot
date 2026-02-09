@@ -19,6 +19,7 @@ import (
 	"github.com/grixate/squidbot/internal/app"
 	"github.com/grixate/squidbot/internal/config"
 	"github.com/grixate/squidbot/internal/cron"
+	"github.com/grixate/squidbot/internal/management"
 	"github.com/grixate/squidbot/internal/memory"
 	"github.com/grixate/squidbot/internal/skills"
 	storepkg "github.com/grixate/squidbot/internal/storage/bbolt"
@@ -57,6 +58,7 @@ func newRootCmd(logger *log.Logger) *cobra.Command {
 	root.AddCommand(statusCmd(configPath))
 	root.AddCommand(agentCmd(configPath, logger))
 	root.AddCommand(gatewayCmd(configPath, logger))
+	root.AddCommand(manageCmd(configPath, logger))
 	root.AddCommand(telegramCmd(configPath))
 	root.AddCommand(cronCmd(configPath, logger))
 	root.AddCommand(doctorCmd(configPath))
@@ -97,6 +99,7 @@ func onboardCmd(configPath string) *cobra.Command {
 	var apiKey string
 	var apiBase string
 	var model string
+	var mode string
 	var nonInteractive bool
 	var verifyGeminiCLI bool
 	var telegramEnabled bool
@@ -112,6 +115,15 @@ func onboardCmd(configPath string) *cobra.Command {
 			if err != nil {
 				return err
 			}
+
+			selectedMode, err := resolveOnboardingMode(cmd.InOrStdin(), cmd.OutOrStdout(), strings.TrimSpace(mode), nonInteractive)
+			if err != nil {
+				return err
+			}
+			if selectedMode == "web" {
+				return runWebOnboarding(cmd, configPath, cfg)
+			}
+
 			result, err := config.RunOnboarding(cmd.Context(), cfg, config.OnboardingOptions{
 				Provider:             providerName,
 				APIKey:               apiKey,
@@ -154,6 +166,7 @@ func onboardCmd(configPath string) *cobra.Command {
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "Provider API key")
 	cmd.Flags().StringVar(&apiBase, "api-base", "", "Provider API base URL")
 	cmd.Flags().StringVar(&model, "model", "", "Provider model")
+	cmd.Flags().StringVar(&mode, "mode", "", "Onboarding mode (cli|web)")
 	cmd.Flags().BoolVar(&nonInteractive, "non-interactive", false, "Disable prompts and require explicit inputs")
 	cmd.Flags().BoolVar(&verifyGeminiCLI, "verify-gemini-cli", false, "Verify Gemini CLI connectivity during onboarding")
 	cmd.Flags().BoolVar(&telegramEnabled, "telegram-enabled", false, "Enable Telegram channel")
@@ -270,7 +283,8 @@ func agentCmd(configPath string, logger *log.Logger) *cobra.Command {
 }
 
 func gatewayCmd(configPath string, logger *log.Logger) *cobra.Command {
-	return &cobra.Command{
+	var withManage bool
+	cmd := &cobra.Command{
 		Use:   "gateway",
 		Short: "Start squidbot gateway (telegram + cron + heartbeat)",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -292,8 +306,56 @@ func gatewayCmd(configPath string, logger *log.Logger) *cobra.Command {
 
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer cancel()
+
+			enableManage := withManage || cfg.Management.ServeInGateway
+			if enableManage {
+				manageServer, buildErr := management.NewServer(cfg, management.Options{
+					ConfigPath:        configPath,
+					RequireSetupToken: true,
+					Logger:            logger,
+				})
+				if buildErr != nil {
+					return buildErr
+				}
+				printManagementLinks(cmd.OutOrStdout(), manageServer)
+				go func() {
+					if serveErr := manageServer.Start(ctx); serveErr != nil {
+						logger.Printf("management server failed: %v", serveErr)
+						cancel()
+					}
+				}()
+			}
+
 			fmt.Println("squidbot gateway started")
 			return runtime.StartGateway(ctx)
+		},
+	}
+	cmd.Flags().BoolVar(&withManage, "with-manage", false, "Serve management UI/API in gateway process")
+	return cmd
+}
+
+func manageCmd(configPath string, logger *log.Logger) *cobra.Command {
+	return &cobra.Command{
+		Use:   "manage",
+		Short: "Start management UI server",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := loadCfg(configPath)
+			if err != nil {
+				return err
+			}
+			server, err := management.NewServer(cfg, management.Options{
+				ConfigPath:        configPath,
+				RequireSetupToken: true,
+				Logger:            logger,
+			})
+			if err != nil {
+				return err
+			}
+			printManagementLinks(cmd.OutOrStdout(), server)
+
+			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer cancel()
+			return server.Start(ctx)
 		},
 	}
 }
@@ -532,5 +594,86 @@ func doctorCmd(configPath string) *cobra.Command {
 			}
 			return fmt.Errorf("doctor checks failed")
 		},
+	}
+}
+
+func resolveOnboardingMode(in io.Reader, out io.Writer, mode string, nonInteractive bool) (string, error) {
+	trimmed := strings.ToLower(strings.TrimSpace(mode))
+	if trimmed != "" {
+		switch trimmed {
+		case "cli", "web":
+			return trimmed, nil
+		default:
+			return "", fmt.Errorf("invalid --mode %q (expected cli|web)", mode)
+		}
+	}
+	if nonInteractive {
+		return "cli", nil
+	}
+	reader := bufio.NewReader(in)
+	fmt.Fprintln(out, "Choose onboarding mode:")
+	fmt.Fprintln(out, "  1) Configure in terminal")
+	fmt.Fprintln(out, "  2) Configure via browser link")
+	for {
+		fmt.Fprint(out, "Mode [1-2]: ")
+		line, err := reader.ReadString('\n')
+		if err != nil && err != io.EOF {
+			return "", err
+		}
+		switch strings.TrimSpace(line) {
+		case "1", "cli":
+			return "cli", nil
+		case "2", "web":
+			return "web", nil
+		}
+		if err == io.EOF {
+			return "", fmt.Errorf("onboarding mode is required")
+		}
+		fmt.Fprintln(out, "Invalid choice. Enter 1 or 2.")
+	}
+}
+
+func runWebOnboarding(cmd *cobra.Command, configPath string, cfg config.Config) error {
+	server, err := management.NewServer(cfg, management.Options{
+		ConfigPath:        configPath,
+		RequireSetupToken: true,
+	})
+	if err != nil {
+		return err
+	}
+	printManagementLinks(cmd.OutOrStdout(), server)
+	ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- server.Start(ctx)
+	}()
+
+	select {
+	case <-server.SetupCompleted():
+		fmt.Fprintln(cmd.OutOrStdout(), "Browser onboarding completed.")
+		cancel()
+		return <-errCh
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		return nil
+	}
+}
+
+func printManagementLinks(w io.Writer, server *management.Server) {
+	local := server.LocalBaseURL()
+	fmt.Fprintf(w, "Management UI: %s/\n", local)
+	setupToken := strings.TrimSpace(server.SetupToken())
+	if setupToken != "" {
+		fmt.Fprintf(w, "Setup link: %s/?setup_token=%s\n", local, setupToken)
+	}
+	public := strings.TrimSpace(server.PublicBaseURL())
+	if public != "" {
+		fmt.Fprintf(w, "Public management URL: %s/\n", public)
+		if setupToken != "" {
+			fmt.Fprintf(w, "Public setup link: %s/?setup_token=%s\n", public, setupToken)
+		}
 	}
 }
