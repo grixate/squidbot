@@ -111,18 +111,18 @@ func RunOnboarding(ctx context.Context, cfg Config, opts OnboardingOptions) (Onb
 func resolveOnboardingProvider(cfg Config, opts OnboardingOptions, reader *bufio.Reader, out io.Writer) (string, ProviderConfig, error) {
 	selected := strings.TrimSpace(opts.Provider)
 	if selected == "" {
-		selected = strings.TrimSpace(cfg.Providers.Active)
-	}
-
-	if selected == "" {
 		if opts.NonInteractive {
-			return "", ProviderConfig{}, fmt.Errorf("non-interactive onboarding requires --provider")
+			selected = strings.TrimSpace(cfg.Providers.Active)
+			if selected == "" {
+				return "", ProviderConfig{}, fmt.Errorf("non-interactive onboarding requires --provider")
+			}
+		} else {
+			p, err := promptProviderSelection(reader, out)
+			if err != nil {
+				return "", ProviderConfig{}, err
+			}
+			selected = p
 		}
-		p, err := promptProviderSelection(reader, out)
-		if err != nil {
-			return "", ProviderConfig{}, err
-		}
-		selected = p
 	}
 
 	normalized, ok := NormalizeProviderName(selected)
