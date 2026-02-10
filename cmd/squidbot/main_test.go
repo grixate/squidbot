@@ -257,22 +257,25 @@ func TestRootCommandDoesNotPrintBannerForSubcommand(t *testing.T) {
 	}
 }
 
-func TestResolveOnboardingModePrompt(t *testing.T) {
-	mode, err := resolveOnboardingMode(strings.NewReader("2\n"), io.Discard, "", false)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if mode != "web" {
-		t.Fatalf("expected web mode, got %q", mode)
+func TestRootCommandDoesNotExposeManage(t *testing.T) {
+	cmd := newRootCmd(log.New(io.Discard, "", 0))
+	for _, sub := range cmd.Commands() {
+		if sub.Name() == "manage" {
+			t.Fatal("expected manage command to be removed")
+		}
 	}
 }
 
-func TestResolveOnboardingModeNonInteractiveDefaultsToCLI(t *testing.T) {
-	mode, err := resolveOnboardingMode(strings.NewReader(""), io.Discard, "", true)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+func TestGatewayCommandDoesNotExposeWithManageFlag(t *testing.T) {
+	cmd := gatewayCmd("", log.New(io.Discard, "", 0))
+	if cmd.Flags().Lookup("with-manage") != nil {
+		t.Fatal("expected --with-manage flag to be removed")
 	}
-	if mode != "cli" {
-		t.Fatalf("expected cli mode, got %q", mode)
+}
+
+func TestOnboardCommandDoesNotExposeWebMode(t *testing.T) {
+	cmd := onboardCmd("")
+	if cmd.Flags().Lookup("mode") != nil {
+		t.Fatal("expected --mode flag to be removed")
 	}
 }
