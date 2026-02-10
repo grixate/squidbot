@@ -57,6 +57,7 @@ func get(t *testing.T, client *http.Client, url string, cookies ...*http.Cookie)
 func TestSetupProviderTestRequiresToken(t *testing.T) {
 	cfg := config.Default()
 	cfg.Management.Port = 0
+	cfg.Storage.DBPath = filepath.Join(t.TempDir(), "squidbot.db")
 	server, err := NewServer(cfg, Options{RequireSetupToken: true})
 	if err != nil {
 		t.Fatalf("new server failed: %v", err)
@@ -77,6 +78,7 @@ func TestSetupCompletePersistsConfigAndHash(t *testing.T) {
 	cfg := config.Default()
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	cfg.Management.Port = 0
+	cfg.Storage.DBPath = filepath.Join(t.TempDir(), "squidbot.db")
 	server, err := NewServer(cfg, Options{
 		ConfigPath:        configPath,
 		RequireSetupToken: true,
@@ -122,6 +124,7 @@ func TestLoginSessionAndLogoutFlow(t *testing.T) {
 	cfg := config.Default()
 	cfg.Providers.Active = config.ProviderOllama
 	cfg.Providers.Ollama.Model = "llama3.1:8b"
+	cfg.Storage.DBPath = filepath.Join(t.TempDir(), "squidbot.db")
 	hash, err := HashPassword("very-secure-password")
 	if err != nil {
 		t.Fatalf("hash failed: %v", err)

@@ -29,6 +29,10 @@ var (
 	bucketKV               = []byte("kv")
 	bucketActorCheckpoints = []byte("actor_checkpoints")
 	bucketSchemaMigrations = []byte("schema_migrations")
+	bucketMissionTasks     = []byte("mission_tasks")
+	bucketMissionColumns   = []byte("mission_columns")
+	bucketUsageDaily       = []byte("usage_daily")
+	bucketHeartbeatRuns    = []byte("heartbeat_runs")
 )
 
 type writeTask struct {
@@ -92,6 +96,10 @@ func (s *Store) initSchema() error {
 			bucketKV,
 			bucketActorCheckpoints,
 			bucketSchemaMigrations,
+			bucketMissionTasks,
+			bucketMissionColumns,
+			bucketUsageDaily,
+			bucketHeartbeatRuns,
 		}
 		for _, b := range buckets {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {

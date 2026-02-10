@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/grixate/squidbot/internal/mission"
 	"github.com/grixate/squidbot/internal/provider"
 )
 
@@ -85,4 +86,13 @@ type SchedulerStore interface {
 
 type ToolEventStore interface {
 	AppendToolEvent(ctx context.Context, event ToolEvent) error
+}
+
+type MissionStore interface {
+	PutMissionTask(ctx context.Context, task mission.Task) error
+	DeleteMissionTask(ctx context.Context, id string) error
+	ListMissionTasks(ctx context.Context) ([]mission.Task, error)
+	ReplaceMissionColumns(ctx context.Context, columns []mission.Column) error
+	ListMissionColumns(ctx context.Context) ([]mission.Column, error)
+	RecordUsageDay(ctx context.Context, day string, promptTokens, completionTokens, totalTokens uint64) error
 }

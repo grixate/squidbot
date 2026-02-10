@@ -1,8 +1,10 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { goto } from '$app/navigation';
   import { Button } from 'bits-ui';
+  import { fetchJSON, parseError } from '$lib/http';
 
-  type Stage = 'loading' | 'onboarding' | 'login' | 'manage';
+  type Stage = 'loading' | 'onboarding' | 'login';
 
   type ProviderInfo = {
     id: string;
@@ -23,43 +25,23 @@
   let apiKey = '';
   let apiBase = '';
   let model = '';
+  let password = '';
+  let providerTestResult = '';
 
   let telegramEnabled = false;
   let telegramToken = '';
   let telegramAllow = '';
 
-  let password = '';
-  let providerTestResult = '';
-
   let loginPassword = '';
-  let manageMessage = 'Loading management state...';
 
-  const clearError = () => {
-    error = '';
+  const clearError = () => (error = '');
+  const setError = (value: unknown) => {
+    error = parseError(value);
   };
-
-  const setError = (message: unknown) => {
-    if (typeof message === 'string') {
-      error = message;
-      return;
-    }
-    error = 'Request failed';
-  };
-
-  async function fetchJSON<T>(url: string, options?: RequestInit): Promise<T> {
-    const response = await fetch(url, options);
-    if (!response.ok) {
-      const body = await response.text();
-      throw new Error(body || `Request failed (${response.status})`);
-    }
-    return (await response.json()) as T;
-  }
 
   function updateProviderDefaults() {
-    const selected = providers.find((item) => item.id === provider);
-    if (!selected) {
-      return;
-    }
+    const selected = providers.find((entry) => entry.id === provider);
+    if (!selected) return;
     if (!apiBase && selected.defaultApiBase) {
       apiBase = selected.defaultApiBase;
     }
@@ -71,7 +53,6 @@
   async function loadState() {
     clearError();
     stage = 'loading';
-
     const setupState = await fetchJSON<{
       setupComplete: boolean;
       providers: ProviderInfo[];
@@ -91,20 +72,18 @@
 
     if (!setupState.setupComplete) {
       stage = 'onboarding';
-      stateNote = 'Complete first-time onboarding to enable management login.';
+      stateNote = 'Complete onboarding to unlock Mission Control.';
       return;
     }
 
     const session = await fetchJSON<{ authenticated: boolean }>('/api/auth/session');
     if (session.authenticated) {
-      stage = 'manage';
-      stateNote = 'Authenticated management session.';
-      await refreshManagePlaceholder();
+      await goto('/app/mission-control');
       return;
     }
 
     stage = 'login';
-    stateNote = 'Setup is complete. Sign in to access management.';
+    stateNote = 'Setup complete. Sign in to continue.';
   }
 
   async function runProviderTest() {
@@ -114,30 +93,24 @@
       const result = await fetchJSON<{ ok: boolean; error?: string }>('/api/setup/provider/test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          setupToken,
-          provider,
-          apiKey,
-          apiBase,
-          model
-        })
+        body: JSON.stringify({ setupToken, provider, apiKey, apiBase, model })
       });
       if (result.ok) {
-        providerTestResult = 'Connection OK';
+        providerTestResult = 'OK';
         return;
       }
       providerTestResult = 'Failed';
-      setError(result.error || 'Provider test failed');
+      error = result.error || 'Provider test failed';
     } catch (err) {
       providerTestResult = 'Failed';
-      setError((err as Error).message);
+      setError(err);
     }
   }
 
   async function completeSetup() {
     clearError();
     try {
-      await fetchJSON<{ ok: boolean }>('/api/setup/complete', {
+      await fetchJSON('/api/setup/complete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -158,7 +131,6 @@
           password
         })
       });
-
       const url = new URL(window.location.href);
       url.searchParams.delete('setup_token');
       window.history.replaceState({}, '', url.toString());
@@ -166,43 +138,22 @@
       password = '';
       await loadState();
     } catch (err) {
-      setError((err as Error).message);
+      setError(err);
     }
   }
 
   async function login() {
     clearError();
     try {
-      await fetchJSON<{ ok: boolean }>('/api/auth/login', {
+      await fetchJSON('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ password: loginPassword })
       });
       loginPassword = '';
-      await loadState();
+      await goto('/app/mission-control');
     } catch (err) {
-      setError((err as Error).message);
-    }
-  }
-
-  async function refreshManagePlaceholder() {
-    clearError();
-    try {
-      const response = await fetchJSON<{ message: string }>('/api/manage/placeholder');
-      manageMessage = response.message || 'Management ready.';
-    } catch (err) {
-      manageMessage = '';
-      setError((err as Error).message);
-    }
-  }
-
-  async function logout() {
-    clearError();
-    try {
-      await fetchJSON<{ ok: boolean }>('/api/auth/logout', { method: 'POST' });
-      await loadState();
-    } catch (err) {
-      setError((err as Error).message);
+      setError(err);
     }
   }
 
@@ -211,90 +162,84 @@
     try {
       await loadState();
     } catch (err) {
-      setError((err as Error).message);
+      setError(err);
       stage = 'loading';
     }
   });
 </script>
 
-<main>
-  <header>
-    <p class="kicker">Squidbot Control Plane</p>
-    <h1>Onboarding and Management</h1>
+<main class="onboarding-shell">
+  <header class="page-header">
+    <p class="kicker">Squidbot</p>
+    <h1>Mission Control Setup</h1>
     <p class="muted">{stateNote}</p>
   </header>
 
+  {#if stage === 'loading'}
+    <section class="panel">
+      <p class="muted">Loading...</p>
+    </section>
+  {/if}
+
   {#if stage === 'onboarding'}
     <section class="panel">
-      <h2>Initial setup</h2>
-      <p class="muted">
-        Provider tests run only when you click Test connection. Remote providers may incur small usage cost.
-      </p>
-
+      <h2>Onboarding</h2>
       <label for="provider">Provider</label>
-      <select id="provider" bind:value={provider} onchange={updateProviderDefaults}>
+      <select id="provider" name="provider" bind:value={provider} onchange={updateProviderDefaults}>
         {#each providers as item}
           <option value={item.id}>{item.label}</option>
         {/each}
       </select>
 
-      <label for="api-key">API key</label>
-      <input id="api-key" bind:value={apiKey} type="password" autocomplete="off" />
+      <label for="api-key">API Key</label>
+      <input id="api-key" name="api_key" bind:value={apiKey} type="password" autocomplete="off" />
 
-      <label for="api-base">API base</label>
-      <input id="api-base" bind:value={apiBase} type="text" autocomplete="off" />
+      <label for="api-base">API Base</label>
+      <input id="api-base" name="api_base" bind:value={apiBase} type="text" autocomplete="off" />
 
       <label for="model">Model</label>
-      <input id="model" bind:value={model} type="text" autocomplete="off" />
+      <input id="model" name="model" bind:value={model} type="text" autocomplete="off" />
 
       <div class="inline">
-        <Button.Root type="button" onclick={runProviderTest}>Test connection</Button.Root>
+        <Button.Root type="button" onclick={runProviderTest}>Test Connection</Button.Root>
         <span class="result">{providerTestResult}</span>
       </div>
 
       <hr />
-
       <label class="checkbox" for="telegram-enabled">
-        <input id="telegram-enabled" bind:checked={telegramEnabled} type="checkbox" />
-        Enable Telegram channel
+        <input id="telegram-enabled" name="telegram_enabled" bind:checked={telegramEnabled} type="checkbox" />
+        Enable Telegram Channel
       </label>
 
-      <label for="telegram-token">Telegram token</label>
-      <input id="telegram-token" bind:value={telegramToken} type="password" autocomplete="off" />
+      <label for="telegram-token">Telegram Token</label>
+      <input id="telegram-token" name="telegram_token" bind:value={telegramToken} type="password" autocomplete="off" />
 
-      <label for="telegram-allow">Telegram allow list (comma-separated)</label>
-      <input id="telegram-allow" bind:value={telegramAllow} type="text" autocomplete="off" />
+      <label for="telegram-allow">Telegram Allow List</label>
+      <input id="telegram-allow" name="telegram_allow" bind:value={telegramAllow} type="text" autocomplete="off" />
 
       <hr />
-
-      <label for="password">Management password (min 12 chars)</label>
-      <input id="password" bind:value={password} type="password" autocomplete="new-password" />
-
-      <Button.Root type="button" onclick={completeSetup}>Complete setup</Button.Root>
+      <label for="password">Management Password (min 12 chars)</label>
+      <input id="password" name="password" bind:value={password} type="password" autocomplete="new-password" />
+      <Button.Root type="button" onclick={completeSetup}>Complete Setup</Button.Root>
     </section>
   {/if}
 
   {#if stage === 'login'}
     <section class="panel">
-      <h2>Management login</h2>
+      <h2>Sign In</h2>
       <label for="login-password">Password</label>
-      <input id="login-password" bind:value={loginPassword} type="password" autocomplete="current-password" />
-      <Button.Root type="button" onclick={login}>Sign in</Button.Root>
-    </section>
-  {/if}
-
-  {#if stage === 'manage'}
-    <section class="panel">
-      <h2>Management interface</h2>
-      <p class="muted">{manageMessage}</p>
-      <div class="inline">
-        <Button.Root type="button" onclick={refreshManagePlaceholder}>Refresh</Button.Root>
-        <Button.Root type="button" onclick={logout}>Logout</Button.Root>
-      </div>
+      <input
+        id="login-password"
+        name="login_password"
+        bind:value={loginPassword}
+        type="password"
+        autocomplete="current-password"
+      />
+      <Button.Root type="button" onclick={login}>Sign In</Button.Root>
     </section>
   {/if}
 
   {#if error}
-    <p class="error">{error}</p>
+    <p class="error" aria-live="polite">{error}</p>
   {/if}
 </main>

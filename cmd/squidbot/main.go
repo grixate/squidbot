@@ -312,6 +312,10 @@ func gatewayCmd(configPath string, logger *log.Logger) *cobra.Command {
 				manageServer, buildErr := management.NewServer(cfg, management.Options{
 					ConfigPath:        configPath,
 					RequireSetupToken: true,
+					Runtime: &management.RuntimeBindings{
+						Metrics:   runtime.Metrics,
+						Heartbeat: runtime.Heartbeat,
+					},
 					Logger:            logger,
 				})
 				if buildErr != nil {

@@ -18,6 +18,7 @@ import (
 
 	"github.com/grixate/squidbot/internal/config"
 	"github.com/grixate/squidbot/internal/provider"
+	"github.com/grixate/squidbot/internal/telemetry"
 )
 
 const (
@@ -34,6 +35,7 @@ type Options struct {
 	PasswordMinLength int
 	SessionIdleTTL    time.Duration
 	SessionMaxTTL     time.Duration
+	Runtime           *RuntimeBindings
 	Logger            *log.Logger
 }
 
@@ -56,6 +58,8 @@ type Server struct {
 	setupDoneOnce   sync.Once
 
 	sessions map[string]sessionRecord
+
+	mission *MissionControlService
 }
 
 type sessionRecord struct {
@@ -104,6 +108,45 @@ func NewServer(cfg config.Config, opts Options) (*Server, error) {
 		sessions:          map[string]sessionRecord{},
 	}
 
+	missionSvc, err := NewMissionControlService(
+		cfg,
+		configPath,
+		func() *telemetry.Metrics {
+			if opts.Runtime != nil && opts.Runtime.Metrics != nil {
+				return opts.Runtime.Metrics
+			}
+			return nil
+		}(),
+		func() HeartbeatRuntime {
+			if opts.Runtime != nil {
+				return opts.Runtime.Heartbeat
+			}
+			return nil
+		}(),
+		logger,
+		func() config.Config {
+			s.mu.RLock()
+			defer s.mu.RUnlock()
+			return s.cfg
+		},
+		func(next config.Config) error {
+			if err := config.Save(configPath, next); err != nil {
+				return err
+			}
+			s.mu.Lock()
+			s.cfg = next
+			s.mu.Unlock()
+			return nil
+		},
+		func(ctx context.Context, providerName string, providerCfg config.ProviderConfig) error {
+			return s.liveProviderCheck(ctx, providerName, providerCfg)
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+	s.mission = missionSvc
+
 	if config.IsSetupComplete(cfg) {
 		s.setupDoneOnce.Do(func() { close(s.setupDone) })
 		return s, nil
@@ -148,6 +191,12 @@ func (s *Server) SetupCompleted() <-chan struct{} {
 }
 
 func (s *Server) Start(ctx context.Context) error {
+	defer func() {
+		if s.mission != nil {
+			_ = s.mission.Close()
+		}
+	}()
+
 	s.mu.RLock()
 	addr := fmt.Sprintf("%s:%d", s.cfg.Management.Host, s.cfg.Management.Port)
 	s.mu.RUnlock()
@@ -186,6 +235,27 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/api/auth/login", s.handleAuthLogin)
 	mux.HandleFunc("/api/auth/logout", s.handleAuthLogout)
 	mux.HandleFunc("/api/auth/session", s.handleAuthSession)
+
+	mux.HandleFunc("/api/manage/overview", s.withManageAuth(s.handleManageOverview))
+	mux.HandleFunc("/api/manage/kanban", s.withManageAuth(s.handleManageKanban))
+	mux.HandleFunc("/api/manage/kanban/columns", s.withManageAuth(s.handleManageKanbanColumns))
+	mux.HandleFunc("/api/manage/kanban/tasks", s.withManageAuth(s.handleManageKanbanTasks))
+	mux.HandleFunc("/api/manage/kanban/tasks/", s.withManageAuth(s.handleManageKanbanTaskByID))
+	mux.HandleFunc("/api/manage/heartbeat", s.withManageAuth(s.handleManageHeartbeat))
+	mux.HandleFunc("/api/manage/heartbeat/trigger", s.withManageAuth(s.handleManageHeartbeatTrigger))
+	mux.HandleFunc("/api/manage/heartbeat/interval", s.withManageAuth(s.handleManageHeartbeatInterval))
+	mux.HandleFunc("/api/manage/memory/search", s.withManageAuth(s.handleManageMemorySearch))
+	mux.HandleFunc("/api/manage/files", s.withManageAuth(s.handleManageFiles))
+	mux.HandleFunc("/api/manage/files/", s.withManageAuth(s.handleManageFileByID))
+	mux.HandleFunc("/api/manage/analytics/health", s.withManageAuth(s.handleManageAnalyticsHealth))
+	mux.HandleFunc("/api/manage/analytics/logs", s.withManageAuth(s.handleManageAnalyticsLogs))
+	mux.HandleFunc("/api/manage/settings", s.withManageAuth(s.handleManageSettings))
+	mux.HandleFunc("/api/manage/settings/provider/test", s.withManageAuth(s.handleManageSettingsProviderTest))
+	mux.HandleFunc("/api/manage/settings/provider", s.withManageAuth(s.handleManageSettingsProvider))
+	mux.HandleFunc("/api/manage/settings/channels/telegram", s.withManageAuth(s.handleManageSettingsTelegram))
+	mux.HandleFunc("/api/manage/settings/runtime", s.withManageAuth(s.handleManageSettingsRuntime))
+	mux.HandleFunc("/api/manage/settings/password", s.withManageAuth(s.handleManageSettingsPassword))
+
 	mux.HandleFunc("/api/manage/placeholder", s.handleManagePlaceholder)
 	mux.HandleFunc("/", s.handleUI)
 

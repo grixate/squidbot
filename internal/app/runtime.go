@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/grixate/squidbot/internal/agent"
@@ -10,6 +11,7 @@ import (
 	"github.com/grixate/squidbot/internal/config"
 	"github.com/grixate/squidbot/internal/cron"
 	"github.com/grixate/squidbot/internal/heartbeat"
+	"github.com/grixate/squidbot/internal/mission"
 	"github.com/grixate/squidbot/internal/provider"
 	storepkg "github.com/grixate/squidbot/internal/storage/bbolt"
 	"github.com/grixate/squidbot/internal/telemetry"
@@ -83,6 +85,25 @@ func BuildRuntime(cfg config.Config, logger *log.Logger) (*Runtime, error) {
 		}
 		return response, err
 	}, metrics)
+	runtime.Heartbeat.SetRunObserver(func(record heartbeat.RunRecord) {
+		preview := strings.TrimSpace(record.Response)
+		if len(preview) > 280 {
+			preview = preview[:277] + "..."
+		}
+		run := mission.HeartbeatRun{
+			ID:          "hb-" + strings.ReplaceAll(record.StartedAt.UTC().Format(time.RFC3339Nano), ":", "-"),
+			TriggeredBy: record.TriggeredBy,
+			Status:      record.Status,
+			Error:       record.Error,
+			Preview:     preview,
+			StartedAt:   record.StartedAt,
+			FinishedAt:  record.FinishedAt,
+			DurationMS:  record.FinishedAt.Sub(record.StartedAt).Milliseconds(),
+		}
+		if err := runtime.Store.RecordHeartbeatRun(context.Background(), run); err != nil {
+			runtime.log.Printf("failed to record heartbeat run: %v", err)
+		}
+	})
 
 	if cfg.Channels.Telegram.Enabled {
 		runtime.Telegram = telegram.New(cfg.Channels.Telegram, func(ctx context.Context, msg agent.InboundMessage) error {

@@ -13,6 +13,7 @@ import (
 	"github.com/oklog/ulid/v2"
 
 	"github.com/grixate/squidbot/internal/config"
+	"github.com/grixate/squidbot/internal/mission"
 	"github.com/grixate/squidbot/internal/memory"
 	"github.com/grixate/squidbot/internal/provider"
 	"github.com/grixate/squidbot/internal/runtime/actor"
@@ -25,6 +26,7 @@ type Store interface {
 	KVStore
 	SchedulerStore
 	ToolEventStore
+	MissionStore
 	SaveCheckpoint(ctx context.Context, sessionID string, payload []byte) error
 	LoadCheckpoint(ctx context.Context, sessionID string) ([]byte, error)
 }
@@ -189,6 +191,9 @@ func (h *sessionHandler) Handle(ctx context.Context, payload interface{}) (inter
 func (h *sessionHandler) Close() error { return nil }
 
 func (h *sessionHandler) process(ctx context.Context, msg InboundMessage) (string, error) {
+	h.engine.metrics.ActiveTurns.Add(1)
+	defer h.engine.metrics.ActiveTurns.Add(-1)
+
 	turnTimeout := time.Duration(h.engine.cfg.Agents.Defaults.TurnTimeoutSec) * time.Second
 	if turnTimeout <= 0 {
 		turnTimeout = 120 * time.Second
@@ -226,6 +231,7 @@ func (h *sessionHandler) process(ctx context.Context, msg InboundMessage) (strin
 			h.engine.metrics.ProviderErrors.Add(1)
 			return "", chatErr
 		}
+		h.engine.recordUsage(turnCtx, response.Usage)
 
 		if response.HasToolCalls() {
 			messages = append(messages, provider.Message{Role: "assistant", Content: response.Content, ToolCalls: response.ToolCalls})
@@ -369,6 +375,14 @@ func (e *Engine) buildRegistry(msg InboundMessage) (*tools.Registry, error) {
 	spawnTool.SetContext(msg.SessionID, msg.Channel, msg.ChatID, msg.SenderID)
 	registry.Register(spawnTool)
 
+	createTaskTool := tools.NewCreateTaskTool(e.createMissionTask)
+	createTaskTool.SetContext(msg.SessionID, msg.Channel, msg.ChatID, msg.RequestID, msg.SenderID)
+	registry.Register(createTaskTool)
+
+	updateTaskTool := tools.NewUpdateTaskTool(e.updateMissionTask)
+	updateTaskTool.SetContext(msg.SessionID, msg.Channel, msg.ChatID, msg.RequestID, msg.SenderID)
+	registry.Register(updateTaskTool)
+
 	return registry, nil
 }
 
@@ -424,6 +438,7 @@ func (e *Engine) runSubtask(ctx context.Context, task string) (string, error) {
 	registry.Register(tools.NewWebFetchTool(30000))
 
 	for i := 0; i < 15; i++ {
+		e.metrics.ProviderCalls.Add(1)
 		resp, err := e.provider.Chat(ctx, provider.ChatRequest{
 			Messages:    messages,
 			Tools:       registry.Definitions(),
@@ -432,8 +447,10 @@ func (e *Engine) runSubtask(ctx context.Context, task string) (string, error) {
 			Temperature: e.cfg.Agents.Defaults.Temperature,
 		})
 		if err != nil {
+			e.metrics.ProviderErrors.Add(1)
 			return "", err
 		}
+		e.recordUsage(ctx, resp.Usage)
 		if resp.HasToolCalls() {
 			messages = append(messages, provider.Message{Role: "assistant", Content: resp.Content, ToolCalls: resp.ToolCalls})
 			for _, tc := range resp.ToolCalls {
@@ -451,4 +468,279 @@ func (e *Engine) runSubtask(ctx context.Context, task string) (string, error) {
 		return resp.Content, nil
 	}
 	return "Task completed but no final response was generated.", nil
+}
+
+func (e *Engine) createMissionTask(ctx context.Context, req tools.CreateTaskRequest) (tools.TaskResult, error) {
+	title := strings.TrimSpace(req.Title)
+	if title == "" {
+		return tools.TaskResult{}, fmt.Errorf("title is required")
+	}
+	columns, err := e.ensureMissionColumns(ctx)
+	if err != nil {
+		return tools.TaskResult{}, err
+	}
+	columnID := strings.TrimSpace(req.ColumnID)
+	if columnID == "" {
+		columnID = mission.ColumnBacklog
+	}
+	if _, ok := columns[columnID]; !ok {
+		columnID = mission.ColumnBacklog
+	}
+
+	now := time.Now().UTC()
+	source := mission.TaskSource{
+		Type:      sourceTypeFromContext(req.Channel, req.SessionID, req.Trigger),
+		SessionID: req.SessionID,
+		Channel:   req.Channel,
+		ChatID:    req.ChatID,
+		RequestID: req.RequestID,
+		Trigger:   req.Trigger,
+	}
+	normalized := mission.NormalizeTaskTitle(title)
+	all, err := e.store.ListMissionTasks(ctx)
+	if err != nil {
+		return tools.TaskResult{}, err
+	}
+
+	const dedupeWindow = 6 * time.Hour
+	for _, candidate := range all {
+		if mission.NormalizeTaskTitle(candidate.Title) != normalized {
+			continue
+		}
+		if candidate.Source.Type != source.Type {
+			continue
+		}
+		if source.SessionID != "" && candidate.Source.SessionID != source.SessionID {
+			continue
+		}
+		if now.Sub(candidate.CreatedAt) > dedupeWindow {
+			continue
+		}
+		candidate.UpdatedAt = now
+		candidate.Version++
+		if strings.TrimSpace(req.Description) != "" {
+			candidate.Description = strings.TrimSpace(req.Description)
+		}
+		if priority := mission.NormalizePriority(req.Priority); priority != "" {
+			candidate.Priority = priority
+		}
+		if strings.TrimSpace(req.Assignee) != "" {
+			candidate.Assignee = strings.TrimSpace(req.Assignee)
+		}
+		if strings.TrimSpace(req.Notes) != "" {
+			if strings.TrimSpace(candidate.Notes) == "" {
+				candidate.Notes = strings.TrimSpace(req.Notes)
+			} else {
+				candidate.Notes = strings.TrimSpace(candidate.Notes) + "\n" + strings.TrimSpace(req.Notes)
+			}
+		}
+		if req.DueAt != nil {
+			due := req.DueAt.UTC()
+			candidate.DueAt = &due
+		}
+		if columnID != "" && candidate.ColumnID != columnID {
+			candidate.ColumnID = columnID
+			candidate.Position = e.nextTaskPosition(all, columnID)
+			candidate.Events = append(candidate.Events, mission.TaskEvent{
+				ID:        e.nextID(),
+				Type:      mission.TaskEventMoved,
+				Actor:     "agent",
+				Summary:   "task moved by dedupe update",
+				CreatedAt: now,
+			})
+		}
+		candidate.Events = append(candidate.Events, mission.TaskEvent{
+			ID:        e.nextID(),
+			Type:      mission.TaskEventUpdated,
+			Actor:     "agent",
+			Summary:   "task updated by dedupe",
+			CreatedAt: now,
+		})
+		if err := e.store.PutMissionTask(ctx, candidate); err != nil {
+			return tools.TaskResult{}, err
+		}
+		return tools.TaskResult{ID: candidate.ID, ColumnID: candidate.ColumnID, Updated: true}, nil
+	}
+
+	task := mission.Task{
+		ID:          e.nextID(),
+		Title:       title,
+		Description: strings.TrimSpace(req.Description),
+		ColumnID:    columnID,
+		Priority:    mission.NormalizePriority(req.Priority),
+		Assignee:    strings.TrimSpace(req.Assignee),
+		Notes:       strings.TrimSpace(req.Notes),
+		Source:      source,
+		Position:    e.nextTaskPosition(all, columnID),
+		CreatedAt:   now,
+		UpdatedAt:   now,
+		Version:     1,
+		Events: []mission.TaskEvent{{
+			ID:        e.nextID(),
+			Type:      mission.TaskEventCreated,
+			Actor:     "agent",
+			Summary:   "task created by agent",
+			CreatedAt: now,
+		}},
+	}
+	if req.DueAt != nil {
+		due := req.DueAt.UTC()
+		task.DueAt = &due
+	}
+	if err := e.store.PutMissionTask(ctx, task); err != nil {
+		return tools.TaskResult{}, err
+	}
+	return tools.TaskResult{ID: task.ID, ColumnID: task.ColumnID, Updated: false}, nil
+}
+
+func (e *Engine) updateMissionTask(ctx context.Context, req tools.UpdateTaskRequest) (tools.TaskResult, error) {
+	taskID := strings.TrimSpace(req.TaskID)
+	if taskID == "" {
+		return tools.TaskResult{}, fmt.Errorf("task_id is required")
+	}
+	all, err := e.store.ListMissionTasks(ctx)
+	if err != nil {
+		return tools.TaskResult{}, err
+	}
+	idx := -1
+	for i := range all {
+		if all[i].ID == taskID {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return tools.TaskResult{}, fmt.Errorf("task not found")
+	}
+	columns, err := e.ensureMissionColumns(ctx)
+	if err != nil {
+		return tools.TaskResult{}, err
+	}
+	now := time.Now().UTC()
+	task := all[idx]
+	if title := strings.TrimSpace(req.Title); title != "" {
+		task.Title = title
+	}
+	if desc := strings.TrimSpace(req.Description); desc != "" {
+		task.Description = desc
+	}
+	if priority := mission.NormalizePriority(req.Priority); priority != "" {
+		task.Priority = priority
+	}
+	if assignee := strings.TrimSpace(req.Assignee); assignee != "" {
+		task.Assignee = assignee
+	}
+	if notes := strings.TrimSpace(req.Notes); notes != "" {
+		if strings.TrimSpace(task.Notes) == "" {
+			task.Notes = notes
+		} else {
+			task.Notes = strings.TrimSpace(task.Notes) + "\n" + notes
+		}
+	}
+	if req.DueAt != nil {
+		due := req.DueAt.UTC()
+		task.DueAt = &due
+	}
+	if column := strings.TrimSpace(req.ColumnID); column != "" {
+		if _, ok := columns[column]; ok && task.ColumnID != column {
+			task.ColumnID = column
+			task.Position = e.nextTaskPosition(all, column)
+			task.Events = append(task.Events, mission.TaskEvent{
+				ID:        e.nextID(),
+				Type:      mission.TaskEventMoved,
+				Actor:     "agent",
+				Summary:   "task moved by update",
+				CreatedAt: now,
+			})
+		}
+	}
+
+	task.UpdatedAt = now
+	task.Version++
+	task.Events = append(task.Events, mission.TaskEvent{
+		ID:        e.nextID(),
+		Type:      mission.TaskEventUpdated,
+		Actor:     "agent",
+		Summary:   "task updated by agent",
+		CreatedAt: now,
+	})
+	if err := e.store.PutMissionTask(ctx, task); err != nil {
+		return tools.TaskResult{}, err
+	}
+	return tools.TaskResult{ID: task.ID, ColumnID: task.ColumnID, Updated: true}, nil
+}
+
+func (e *Engine) ensureMissionColumns(ctx context.Context) (map[string]mission.Column, error) {
+	columns, err := e.store.ListMissionColumns(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(columns) == 0 {
+		defaults := mission.DefaultColumns(time.Now().UTC())
+		if err := e.store.ReplaceMissionColumns(ctx, defaults); err != nil {
+			return nil, err
+		}
+		columns = defaults
+	}
+	out := make(map[string]mission.Column, len(columns))
+	for _, column := range columns {
+		out[column.ID] = column
+	}
+	return out, nil
+}
+
+func (e *Engine) nextTaskPosition(tasks []mission.Task, columnID string) int {
+	maxPos := -1
+	for _, task := range tasks {
+		if task.ColumnID != columnID {
+			continue
+		}
+		if task.Position > maxPos {
+			maxPos = task.Position
+		}
+	}
+	return maxPos + 1
+}
+
+func sourceTypeFromContext(channel, sessionID, trigger string) mission.TaskSourceType {
+	trigger = strings.TrimSpace(strings.ToLower(trigger))
+	if trigger == "subagent" {
+		return mission.TaskSourceSubagent
+	}
+	switch strings.TrimSpace(strings.ToLower(channel)) {
+	case "system":
+		if strings.TrimSpace(strings.ToLower(sessionID)) == "system:heartbeat" {
+			return mission.TaskSourceHeartbeat
+		}
+		return mission.TaskSourceSystem
+	case "cron":
+		return mission.TaskSourceCron
+	case "api":
+		return mission.TaskSourceAPI
+	default:
+		return mission.TaskSourceChat
+	}
+}
+
+func (e *Engine) recordUsage(ctx context.Context, usage provider.Usage) {
+	if usage.PromptTokens <= 0 && usage.CompletionTokens <= 0 && usage.TotalTokens <= 0 {
+		return
+	}
+	day := time.Now().UTC().Format("2006-01-02")
+	if err := e.store.RecordUsageDay(
+		ctx,
+		day,
+		uint64(max(usage.PromptTokens, 0)),
+		uint64(max(usage.CompletionTokens, 0)),
+		uint64(max(usage.TotalTokens, 0)),
+	); err != nil {
+		e.log.Printf("failed to record token usage: %v", err)
+	}
+}
+
+func max(v, floor int) int {
+	if v < floor {
+		return floor
+	}
+	return v
 }
