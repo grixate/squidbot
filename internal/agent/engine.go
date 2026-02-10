@@ -167,29 +167,6 @@ func (e *Engine) currentProviderModel() (provider.LLMProvider, string) {
 	return e.provider, e.model
 }
 
-func (e *Engine) ApplyProviderConfig(providerName string, providerCfg config.ProviderConfig) error {
-	normalized, ok := config.NormalizeProviderName(providerName)
-	if !ok {
-		return fmt.Errorf("unsupported provider %q", providerName)
-	}
-	if err := config.ValidateProviderDraft(normalized, providerCfg); err != nil {
-		return err
-	}
-	next := e.currentConfig()
-	next.Providers.Active = normalized
-	_ = next.SetProviderByName(normalized, providerCfg)
-	client, model, err := provider.FromConfig(next)
-	if err != nil {
-		return err
-	}
-	e.stateMu.Lock()
-	e.cfg = next
-	e.provider = client
-	e.model = model
-	e.stateMu.Unlock()
-	return nil
-}
-
 func (e *Engine) newSessionHandler(sessionID string) (actor.SessionHandler, error) {
 	h := &sessionHandler{engine: e, sessionID: sessionID}
 	if checkpoint, err := e.store.LoadCheckpoint(context.Background(), sessionID); err == nil && len(checkpoint) > 0 {
