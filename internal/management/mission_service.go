@@ -28,6 +28,7 @@ var (
 
 type MissionControlService struct {
 	store        *storepkg.Store
+	ownsStore    bool
 	configPath   string
 	metrics      *telemetry.Metrics
 	heartbeat    HeartbeatRuntime
@@ -146,6 +147,7 @@ var editableFiles = map[string]FileDescriptor{
 func NewMissionControlService(
 	initialCfg config.Config,
 	configPath string,
+	externalStore *storepkg.Store,
 	metrics *telemetry.Metrics,
 	heartbeat HeartbeatRuntime,
 	runtime RuntimeController,
@@ -174,13 +176,20 @@ func NewMissionControlService(
 		}
 	}
 
-	store, err := storepkg.Open(initialCfg.Storage.DBPath)
-	if err != nil {
-		return nil, err
+	store := externalStore
+	ownsStore := false
+	if store == nil {
+		var err error
+		store, err = storepkg.Open(initialCfg.Storage.DBPath)
+		if err != nil {
+			return nil, err
+		}
+		ownsStore = true
 	}
 
 	svc := &MissionControlService{
 		store:        store,
+		ownsStore:    ownsStore,
 		configPath:   configPath,
 		metrics:      metrics,
 		heartbeat:    heartbeat,
@@ -191,14 +200,16 @@ func NewMissionControlService(
 		providerTest: providerTest,
 	}
 	if _, err := svc.ensureColumns(context.Background()); err != nil {
-		_ = store.Close()
+		if svc.ownsStore {
+			_ = store.Close()
+		}
 		return nil, err
 	}
 	return svc, nil
 }
 
 func (s *MissionControlService) Close() error {
-	if s == nil || s.store == nil {
+	if s == nil || s.store == nil || !s.ownsStore {
 		return nil
 	}
 	return s.store.Close()

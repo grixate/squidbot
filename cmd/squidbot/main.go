@@ -316,6 +316,7 @@ func gatewayCmd(configPath string, logger *log.Logger) *cobra.Command {
 						Metrics:    runtime.Metrics,
 						Heartbeat:  runtime.Heartbeat,
 						Controller: runtime,
+						Store:      runtime.Store,
 					},
 					Logger: logger,
 				})

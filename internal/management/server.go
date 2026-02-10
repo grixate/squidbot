@@ -18,6 +18,7 @@ import (
 
 	"github.com/grixate/squidbot/internal/config"
 	"github.com/grixate/squidbot/internal/provider"
+	storepkg "github.com/grixate/squidbot/internal/storage/bbolt"
 	"github.com/grixate/squidbot/internal/telemetry"
 )
 
@@ -111,6 +112,12 @@ func NewServer(cfg config.Config, opts Options) (*Server, error) {
 	missionSvc, err := NewMissionControlService(
 		cfg,
 		configPath,
+		func() *storepkg.Store {
+			if opts.Runtime != nil {
+				return opts.Runtime.Store
+			}
+			return nil
+		}(),
 		func() *telemetry.Metrics {
 			if opts.Runtime != nil && opts.Runtime.Metrics != nil {
 				return opts.Runtime.Metrics

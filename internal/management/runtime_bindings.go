@@ -6,6 +6,7 @@ import (
 
 	"github.com/grixate/squidbot/internal/config"
 	"github.com/grixate/squidbot/internal/heartbeat"
+	storepkg "github.com/grixate/squidbot/internal/storage/bbolt"
 	"github.com/grixate/squidbot/internal/telemetry"
 )
 
@@ -22,6 +23,7 @@ type RuntimeBindings struct {
 	Metrics    *telemetry.Metrics
 	Heartbeat  HeartbeatRuntime
 	Controller RuntimeController
+	Store      *storepkg.Store
 }
 
 type RuntimeController interface {
