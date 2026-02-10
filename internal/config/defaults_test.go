@@ -24,9 +24,6 @@ func TestDefaultIncludesMemoryAndSkillsSettings(t *testing.T) {
 	if len(cfg.Skills.Paths) != 1 {
 		t.Fatalf("unexpected skills paths defaults: %#v", cfg.Skills.Paths)
 	}
-	if cfg.Management.Host != "127.0.0.1" || cfg.Management.Port != 18790 {
-		t.Fatalf("unexpected management defaults: %#v", cfg.Management)
-	}
 }
 
 func TestLoadBackfillsMissingMemoryAndSkillsFields(t *testing.T) {
@@ -47,7 +44,21 @@ func TestLoadBackfillsMissingMemoryAndSkillsFields(t *testing.T) {
 	if len(cfg.Skills.Paths) == 0 {
 		t.Fatal("expected skills paths defaults to be backfilled")
 	}
-	if cfg.Management.Port != 18790 {
-		t.Fatalf("expected management defaults to be backfilled, got %#v", cfg.Management)
+}
+
+func TestLoadIgnoresLegacyManagementObject(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	path := filepath.Join(t.TempDir(), "legacy-management-config.json")
+	raw := `{"agents":{"defaults":{"workspace":"","model":"anthropic/claude-opus-4-1","maxTokens":8192,"temperature":0.7,"maxToolIterations":20,"turnTimeoutSec":120,"toolTimeoutSec":60}},"providers":{},"channels":{"telegram":{"enabled":false,"token":"","allowFrom":[]}},"tools":{"web":{"search":{"apiKey":"","maxResults":5}}},"gateway":{"host":"0.0.0.0","port":18789},"management":{"host":"127.0.0.1","port":18790,"publicBaseUrl":"","serveInGateway":true},"storage":{"backend":"bbolt","dbPath":""},"runtime":{"mailboxSize":64,"actorIdleTtl":"15m0s","heartbeatIntervalSec":1800}}`
+	if err := os.WriteFile(path, []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Gateway.Port != 18789 {
+		t.Fatalf("unexpected gateway port after loading legacy config: %d", cfg.Gateway.Port)
 	}
 }

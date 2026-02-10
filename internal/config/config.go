@@ -11,17 +11,16 @@ import (
 )
 
 type Config struct {
-	Agents     AgentsConfig     `json:"agents"`
-	Providers  ProvidersConfig  `json:"providers"`
-	Channels   ChannelsConfig   `json:"channels"`
-	Tools      ToolsConfig      `json:"tools"`
-	Gateway    GatewayConfig    `json:"gateway"`
-	Management ManagementConfig `json:"management"`
-	Auth       AuthConfig       `json:"auth"`
-	Storage    StorageConfig    `json:"storage"`
-	Runtime    RuntimeConfig    `json:"runtime"`
-	Memory     MemoryConfig     `json:"memory"`
-	Skills     SkillsConfig     `json:"skills"`
+	Agents    AgentsConfig    `json:"agents"`
+	Providers ProvidersConfig `json:"providers"`
+	Channels  ChannelsConfig  `json:"channels"`
+	Tools     ToolsConfig     `json:"tools"`
+	Gateway   GatewayConfig   `json:"gateway"`
+	Auth      AuthConfig      `json:"auth"`
+	Storage   StorageConfig   `json:"storage"`
+	Runtime   RuntimeConfig   `json:"runtime"`
+	Memory    MemoryConfig    `json:"memory"`
+	Skills    SkillsConfig    `json:"skills"`
 }
 
 type AgentsConfig struct {
@@ -91,13 +90,6 @@ type WebSearchConfig struct {
 type GatewayConfig struct {
 	Host string `json:"host"`
 	Port int    `json:"port"`
-}
-
-type ManagementConfig struct {
-	Host           string `json:"host"`
-	Port           int    `json:"port"`
-	PublicBaseURL  string `json:"publicBaseUrl"`
-	ServeInGateway bool   `json:"serveInGateway"`
 }
 
 type AuthConfig struct {
@@ -208,12 +200,6 @@ func Default() Config {
 		Gateway: GatewayConfig{
 			Host: "0.0.0.0",
 			Port: 18789,
-		},
-		Management: ManagementConfig{
-			Host:           "127.0.0.1",
-			Port:           18790,
-			PublicBaseURL:  "",
-			ServeInGateway: false,
 		},
 		Auth: AuthConfig{},
 		Storage: StorageConfig{
