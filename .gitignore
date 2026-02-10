@@ -4,3 +4,5 @@
 *.db.lock
 *.log
 .DS_Store
+.dev-home/
+.dev-bin/

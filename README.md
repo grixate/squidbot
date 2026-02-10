@@ -23,6 +23,29 @@ Go-native personal AI assistant with Telegram integration, actor-based session r
 go build -o squidbot ./cmd/squidbot
 ```
 
+## Isolated Local Testing
+
+Use the repo wrapper to keep config/data/workspace local to this clone instead of `~/.squidbot`:
+
+```bash
+./scripts/dev-squidbot.sh onboard
+./scripts/dev-squidbot.sh gateway --with-manage
+./scripts/dev-squidbot.sh status
+```
+
+Useful helpers:
+
+```bash
+./scripts/dev-squidbot.sh where   # print isolated paths
+./scripts/dev-squidbot.sh reset   # remove isolated state
+```
+
+To change the isolated root directory:
+
+```bash
+SQUIDBOT_DEV_HOME=/tmp/squidbot-dev ./scripts/dev-squidbot.sh status
+```
+
 ## Quick Start
 
 1. Initialize config and workspace:
