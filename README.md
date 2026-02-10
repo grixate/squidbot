@@ -10,12 +10,16 @@ Go-native personal AI assistant with Telegram integration, actor-based session r
 - Tool loop with typed tool argument boundaries
 - Provider adapters for OpenRouter, Anthropic, OpenAI, Gemini, Ollama, and LM Studio
 - Mandatory provider-gated onboarding before runtime commands
-- Browser onboarding and management UI server (`squidbot manage`)
 - Telegram channel adapter (polling)
 - Cron scheduler and heartbeat service
 - Auto-discovered skill contracts from `skills/**/SKILL.md`
 - Episodic daily memory logs in `memory/daily/YYYY-MM-DD.md`
 - Structured runtime metrics counters
+
+## Branch Policy
+
+- `main`: core Go/CLI runtime only.
+- `squidbot-ui`: visual onboarding and management stack.
 
 ## Install
 
@@ -29,7 +33,7 @@ Use the repo wrapper to keep config/data/workspace local to this clone instead o
 
 ```bash
 ./scripts/dev-squidbot.sh onboard
-./scripts/dev-squidbot.sh gateway --with-manage
+./scripts/dev-squidbot.sh gateway
 ./scripts/dev-squidbot.sh status
 ```
 
@@ -56,7 +60,6 @@ SQUIDBOT_DEV_HOME=/tmp/squidbot-dev ./scripts/dev-squidbot.sh status
 2. Follow CLI prompts to choose provider and enter credentials/model.
    Onboarding also supports optional Telegram setup (enable flag, bot token, allow list).
    For Gemini you can optionally verify Gemini CLI connectivity during onboarding.
-   You can choose terminal onboarding or browser onboarding (`--mode web`).
 
 3. Run direct chat:
 ```bash
@@ -118,7 +121,6 @@ Telegram flags for non-interactive onboarding:
 ## CLI
 
 - `squidbot onboard`
-- `squidbot manage`
 - `squidbot status`
 - `squidbot agent -m "..."`
 - `squidbot agent`
@@ -126,12 +128,6 @@ Telegram flags for non-interactive onboarding:
 - `squidbot telegram status`
 - `squidbot cron list|add|remove|enable|run`
 - `squidbot doctor`
-
-Gateway can also host management UI/API when started with:
-
-```bash
-./squidbot gateway --with-manage
-```
 
 ## Testing
 

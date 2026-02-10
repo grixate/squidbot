@@ -9,17 +9,11 @@ Provider setup is mandatory before runtime commands (`agent`, `gateway`, `cron r
 ```
 
 The CLI will ask you to:
-- choose setup mode (`cli` or `web`)
 - choose a provider
 - enter required credentials
 - set API base/model defaults
 - optionally configure Telegram (`enabled`, `token`, allow list)
 - optionally verify Gemini CLI connectivity for Gemini
-- set the management password (browser mode)
-
-When browser mode is selected, squidbot starts a temporary setup server and prints:
-- local onboarding link
-- optional public link when `management.publicBaseUrl` is configured
 
 Onboarding also ensures workspace scaffolding for:
 
@@ -53,10 +47,6 @@ Telegram flags:
 - `--telegram-enabled` (requires `--telegram-token` when enabled)
 - `--telegram-token <bot_token>`
 - `--telegram-allow-from <id_or_username>` (repeatable, comma-separated supported)
-
-Onboarding mode flag:
-
-- `--mode cli|web` (default: prompt in interactive mode, `cli` in non-interactive mode)
 
 ## Verify Setup
 

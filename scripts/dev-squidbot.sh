@@ -24,7 +24,7 @@ Environment:
 
 Examples:
   scripts/dev-squidbot.sh onboard
-  scripts/dev-squidbot.sh gateway --with-manage
+  scripts/dev-squidbot.sh gateway
   scripts/dev-squidbot.sh status
   scripts/dev-squidbot.sh reset
 USAGE
