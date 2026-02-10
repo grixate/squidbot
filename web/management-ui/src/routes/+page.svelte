@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
-  import { Button } from 'bits-ui';
+  import { UIButton, UISelect, UISwitch } from '$lib/components/ui';
   import { fetchJSON, parseError } from '$lib/http';
 
   type Stage = 'loading' | 'onboarding' | 'login';
@@ -16,7 +16,7 @@
   };
 
   let stage: Stage = 'loading';
-  let stateNote = 'Loading setup state...';
+  let stateNote = 'Loading setup state…';
   let error = '';
 
   let setupToken = '';
@@ -33,6 +33,7 @@
   let telegramAllow = '';
 
   let loginPassword = '';
+  let providerOptions: Array<{ value: string; label: string; disabled?: boolean }> = [];
 
   const clearError = () => (error = '');
   const setError = (value: unknown) => {
@@ -48,6 +49,11 @@
     if (!model && selected.defaultModel) {
       model = selected.defaultModel;
     }
+  }
+
+  $: providerOptions = providers.map((item) => ({ value: item.id, label: item.label }));
+  $: if (provider) {
+    updateProviderDefaults();
   }
 
   async function loadState() {
@@ -88,7 +94,7 @@
 
   async function runProviderTest() {
     clearError();
-    providerTestResult = 'Testing...';
+    providerTestResult = 'Testing…';
     try {
       const result = await fetchJSON<{ ok: boolean; error?: string }>('/api/setup/provider/test', {
         method: 'POST',
@@ -177,7 +183,7 @@
 
   {#if stage === 'loading'}
     <section class="panel">
-      <p class="muted">Loading...</p>
+      <p class="muted">Loading…</p>
     </section>
   {/if}
 
@@ -185,11 +191,14 @@
     <section class="panel">
       <h2>Onboarding</h2>
       <label for="provider">Provider</label>
-      <select id="provider" name="provider" bind:value={provider} onchange={updateProviderDefaults}>
-        {#each providers as item}
-          <option value={item.id}>{item.label}</option>
-        {/each}
-      </select>
+      <UISelect
+        id="provider"
+        name="provider"
+        bind:value={provider}
+        options={providerOptions}
+        ariaLabel="Provider"
+        placeholder="Select provider…"
+      />
 
       <label for="api-key">API Key</label>
       <input id="api-key" name="api_key" bind:value={apiKey} type="password" autocomplete="off" />
@@ -201,15 +210,15 @@
       <input id="model" name="model" bind:value={model} type="text" autocomplete="off" />
 
       <div class="inline">
-        <Button.Root type="button" onclick={runProviderTest}>Test Connection</Button.Root>
+        <UIButton type="button" onclick={runProviderTest}>Test Connection</UIButton>
         <span class="result">{providerTestResult}</span>
       </div>
 
       <hr />
-      <label class="checkbox" for="telegram-enabled">
-        <input id="telegram-enabled" name="telegram_enabled" bind:checked={telegramEnabled} type="checkbox" />
-        Enable Telegram Channel
-      </label>
+      <div class="checkbox">
+        <UISwitch bind:checked={telegramEnabled} ariaLabel="Enable Telegram Channel" />
+        <span>Enable Telegram Channel</span>
+      </div>
 
       <label for="telegram-token">Telegram Token</label>
       <input id="telegram-token" name="telegram_token" bind:value={telegramToken} type="password" autocomplete="off" />
@@ -220,7 +229,7 @@
       <hr />
       <label for="password">Management Password (min 12 chars)</label>
       <input id="password" name="password" bind:value={password} type="password" autocomplete="new-password" />
-      <Button.Root type="button" onclick={completeSetup}>Complete Setup</Button.Root>
+      <UIButton type="button" onclick={completeSetup}>Complete Setup</UIButton>
     </section>
   {/if}
 
@@ -235,7 +244,7 @@
         type="password"
         autocomplete="current-password"
       />
-      <Button.Root type="button" onclick={login}>Sign In</Button.Root>
+      <UIButton type="button" onclick={login}>Sign In</UIButton>
     </section>
   {/if}
 

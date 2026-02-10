@@ -1,0 +1,1 @@
+const i=new Intl.DateTimeFormat(void 0,{year:"numeric",month:"short",day:"2-digit",hour:"2-digit",minute:"2-digit"});function n(t){if(!t)return"n/a";const e=t instanceof Date?t:new Date(t);return Number.isNaN(e.getTime())?"n/a":i.format(e)}export{n as f};

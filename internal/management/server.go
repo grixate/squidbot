@@ -123,6 +123,12 @@ func NewServer(cfg config.Config, opts Options) (*Server, error) {
 			}
 			return nil
 		}(),
+		func() RuntimeController {
+			if opts.Runtime != nil {
+				return opts.Runtime.Controller
+			}
+			return nil
+		}(),
 		logger,
 		func() config.Config {
 			s.mu.RLock()
@@ -238,6 +244,7 @@ func (s *Server) routes() http.Handler {
 
 	mux.HandleFunc("/api/manage/overview", s.withManageAuth(s.handleManageOverview))
 	mux.HandleFunc("/api/manage/kanban", s.withManageAuth(s.handleManageKanban))
+	mux.HandleFunc("/api/manage/kanban/policy", s.withManageAuth(s.handleManageKanbanPolicy))
 	mux.HandleFunc("/api/manage/kanban/columns", s.withManageAuth(s.handleManageKanbanColumns))
 	mux.HandleFunc("/api/manage/kanban/tasks", s.withManageAuth(s.handleManageKanbanTasks))
 	mux.HandleFunc("/api/manage/kanban/tasks/", s.withManageAuth(s.handleManageKanbanTaskByID))
@@ -248,13 +255,20 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/api/manage/files", s.withManageAuth(s.handleManageFiles))
 	mux.HandleFunc("/api/manage/files/", s.withManageAuth(s.handleManageFileByID))
 	mux.HandleFunc("/api/manage/analytics/health", s.withManageAuth(s.handleManageAnalyticsHealth))
+	mux.HandleFunc("/api/manage/analytics/summary", s.withManageAuth(s.handleManageAnalyticsSummary))
 	mux.HandleFunc("/api/manage/analytics/logs", s.withManageAuth(s.handleManageAnalyticsLogs))
 	mux.HandleFunc("/api/manage/settings", s.withManageAuth(s.handleManageSettings))
+	mux.HandleFunc("/api/manage/settings/providers", s.withManageAuth(s.handleManageSettingsProviders))
+	mux.HandleFunc("/api/manage/settings/providers/", s.withManageAuth(s.handleManageSettingsProviderByID))
 	mux.HandleFunc("/api/manage/settings/provider/test", s.withManageAuth(s.handleManageSettingsProviderTest))
 	mux.HandleFunc("/api/manage/settings/provider", s.withManageAuth(s.handleManageSettingsProvider))
+	mux.HandleFunc("/api/manage/settings/channels", s.withManageAuth(s.handleManageSettingsChannels))
+	mux.HandleFunc("/api/manage/settings/channels/", s.withManageAuth(s.handleManageSettingsChannelByID))
 	mux.HandleFunc("/api/manage/settings/channels/telegram", s.withManageAuth(s.handleManageSettingsTelegram))
 	mux.HandleFunc("/api/manage/settings/runtime", s.withManageAuth(s.handleManageSettingsRuntime))
 	mux.HandleFunc("/api/manage/settings/password", s.withManageAuth(s.handleManageSettingsPassword))
+	mux.HandleFunc("/api/manage/snapshot/export", s.withManageAuth(s.handleManageSnapshotExport))
+	mux.HandleFunc("/api/manage/snapshot/import", s.withManageAuth(s.handleManageSnapshotImport))
 
 	mux.HandleFunc("/api/manage/placeholder", s.handleManagePlaceholder)
 	mux.HandleFunc("/", s.handleUI)

@@ -313,10 +313,11 @@ func gatewayCmd(configPath string, logger *log.Logger) *cobra.Command {
 					ConfigPath:        configPath,
 					RequireSetupToken: true,
 					Runtime: &management.RuntimeBindings{
-						Metrics:   runtime.Metrics,
-						Heartbeat: runtime.Heartbeat,
+						Metrics:    runtime.Metrics,
+						Heartbeat:  runtime.Heartbeat,
+						Controller: runtime,
 					},
-					Logger:            logger,
+					Logger: logger,
 				})
 				if buildErr != nil {
 					return buildErr

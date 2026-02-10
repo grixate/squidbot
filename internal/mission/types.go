@@ -110,6 +110,54 @@ type HeartbeatRun struct {
 	DurationMS  int64     `json:"duration_ms"`
 }
 
+type TaskAutomationPolicy struct {
+	EnableChat      bool      `json:"enable_chat"`
+	EnableHeartbeat bool      `json:"enable_heartbeat"`
+	EnableCron      bool      `json:"enable_cron"`
+	EnableSubagent  bool      `json:"enable_subagent"`
+	DedupeWindowSec int       `json:"dedupe_window_sec"`
+	DefaultColumnID string    `json:"default_column_id"`
+	UpdatedAt       time.Time `json:"updated_at"`
+}
+
+func DefaultTaskAutomationPolicy(now time.Time) TaskAutomationPolicy {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	return TaskAutomationPolicy{
+		EnableChat:      true,
+		EnableHeartbeat: true,
+		EnableCron:      true,
+		EnableSubagent:  true,
+		DedupeWindowSec: int((6 * time.Hour).Seconds()),
+		DefaultColumnID: ColumnBacklog,
+		UpdatedAt:       now,
+	}
+}
+
+func (p TaskAutomationPolicy) DedupeWindow() time.Duration {
+	sec := p.DedupeWindowSec
+	if sec <= 0 {
+		sec = int((6 * time.Hour).Seconds())
+	}
+	return time.Duration(sec) * time.Second
+}
+
+func (p TaskAutomationPolicy) EnabledForSource(source TaskSourceType) bool {
+	switch source {
+	case TaskSourceHeartbeat:
+		return p.EnableHeartbeat
+	case TaskSourceCron:
+		return p.EnableCron
+	case TaskSourceSubagent:
+		return p.EnableSubagent
+	case TaskSourceChat:
+		return p.EnableChat
+	default:
+		return true
+	}
+}
+
 func NormalizeTaskTitle(in string) string {
 	trimmed := strings.TrimSpace(strings.ToLower(in))
 	if trimmed == "" {

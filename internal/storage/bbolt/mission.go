@@ -29,6 +29,8 @@ func heartbeatRunKey(id string) string {
 	return "hbrun:" + strings.TrimSpace(id)
 }
 
+const missionPolicyKey = "task_automation_policy"
+
 func (s *Store) PutMissionTask(ctx context.Context, task mission.Task) error {
 	bytes, err := json.Marshal(task)
 	if err != nil {
@@ -137,6 +139,24 @@ func (s *Store) RecordUsageDay(ctx context.Context, day string, promptTokens, co
 	})
 }
 
+func (s *Store) PutUsageDay(ctx context.Context, usage mission.UsageDay) error {
+	day := strings.TrimSpace(usage.Day)
+	if day == "" {
+		day = time.Now().UTC().Format("2006-01-02")
+	}
+	usage.Day = day
+	if usage.UpdatedAt.IsZero() {
+		usage.UpdatedAt = time.Now().UTC()
+	}
+	bytes, err := json.Marshal(usage)
+	if err != nil {
+		return err
+	}
+	return s.runWrite(ctx, func(tx *bbolt.Tx) error {
+		return tx.Bucket(bucketUsageDaily).Put([]byte(usageDayKey(day)), bytes)
+	})
+}
+
 func (s *Store) ListUsageDays(_ context.Context) ([]mission.UsageDay, error) {
 	out := make([]mission.UsageDay, 0, 32)
 	err := s.db.View(func(tx *bbolt.Tx) error {
@@ -164,6 +184,44 @@ func (s *Store) RecordHeartbeatRun(ctx context.Context, run mission.HeartbeatRun
 	return s.runWrite(ctx, func(tx *bbolt.Tx) error {
 		return tx.Bucket(bucketHeartbeatRuns).Put([]byte(heartbeatRunKey(run.ID)), bytes)
 	})
+}
+
+func (s *Store) PutTaskAutomationPolicy(ctx context.Context, policy mission.TaskAutomationPolicy) error {
+	if policy.UpdatedAt.IsZero() {
+		policy.UpdatedAt = time.Now().UTC()
+	}
+	bytes, err := json.Marshal(policy)
+	if err != nil {
+		return err
+	}
+	return s.runWrite(ctx, func(tx *bbolt.Tx) error {
+		return tx.Bucket(bucketMissionPolicy).Put([]byte(missionPolicyKey), bytes)
+	})
+}
+
+func (s *Store) GetTaskAutomationPolicy(_ context.Context) (mission.TaskAutomationPolicy, error) {
+	policy := mission.DefaultTaskAutomationPolicy(time.Now().UTC())
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket(bucketMissionPolicy)
+		if bucket == nil {
+			return nil
+		}
+		raw := bucket.Get([]byte(missionPolicyKey))
+		if len(raw) == 0 {
+			return nil
+		}
+		return json.Unmarshal(raw, &policy)
+	})
+	if err != nil {
+		return mission.TaskAutomationPolicy{}, err
+	}
+	if strings.TrimSpace(policy.DefaultColumnID) == "" {
+		policy.DefaultColumnID = mission.ColumnBacklog
+	}
+	if policy.DedupeWindowSec <= 0 {
+		policy.DedupeWindowSec = int((6 * time.Hour).Seconds())
+	}
+	return policy, nil
 }
 
 func (s *Store) ListHeartbeatRuns(_ context.Context, limit int) ([]mission.HeartbeatRun, error) {

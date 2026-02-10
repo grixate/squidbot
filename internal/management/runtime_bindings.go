@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/grixate/squidbot/internal/config"
 	"github.com/grixate/squidbot/internal/heartbeat"
 	"github.com/grixate/squidbot/internal/telemetry"
 )
@@ -18,6 +19,12 @@ type HeartbeatRuntime interface {
 }
 
 type RuntimeBindings struct {
-	Metrics   *telemetry.Metrics
-	Heartbeat HeartbeatRuntime
+	Metrics    *telemetry.Metrics
+	Heartbeat  HeartbeatRuntime
+	Controller RuntimeController
+}
+
+type RuntimeController interface {
+	ApplyProvider(ctx context.Context, providerName string, providerCfg config.ProviderConfig) error
+	ApplyTelegram(ctx context.Context, telegram config.TelegramConfig) error
 }

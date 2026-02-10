@@ -31,6 +31,7 @@ var (
 	bucketSchemaMigrations = []byte("schema_migrations")
 	bucketMissionTasks     = []byte("mission_tasks")
 	bucketMissionColumns   = []byte("mission_columns")
+	bucketMissionPolicy    = []byte("mission_policy")
 	bucketUsageDaily       = []byte("usage_daily")
 	bucketHeartbeatRuns    = []byte("heartbeat_runs")
 )
@@ -98,6 +99,7 @@ func (s *Store) initSchema() error {
 			bucketSchemaMigrations,
 			bucketMissionTasks,
 			bucketMissionColumns,
+			bucketMissionPolicy,
 			bucketUsageDaily,
 			bucketHeartbeatRuns,
 		}

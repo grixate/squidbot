@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
   import { page } from '$app/stores';
-  import { Button } from 'bits-ui';
+  import { UIButton } from '$lib/components/ui';
   import { fetchJSON, parseError } from '$lib/http';
 
   let loading = true;
@@ -52,7 +52,7 @@
 {#if loading}
   <main class="loading-shell">
     <p class="kicker">Mission Control</p>
-    <p class="muted">Loading session...</p>
+    <p class="muted">Loading session…</p>
   </main>
 {:else}
   <a class="skip-link" href="#main-content">Skip to Main Content</a>
@@ -74,7 +74,7 @@
           </a>
         {/each}
       </nav>
-      <Button.Root type="button" class="logout" onclick={logout}>Logout</Button.Root>
+      <UIButton type="button" className="logout" onclick={logout}>Logout</UIButton>
       {#if error}
         <p class="error" aria-live="polite">{error}</p>
       {/if}

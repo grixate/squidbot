@@ -48,6 +48,62 @@ func (s *Server) handleManageKanban(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, board)
 }
 
+func (s *Server) handleManageKanbanPolicy(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		policy, err := s.mission.TaskPolicy(r.Context())
+		if err != nil {
+			writeManageError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"policy": policy})
+	case http.MethodPut:
+		current, err := s.mission.TaskPolicy(r.Context())
+		if err != nil {
+			writeManageError(w, err)
+			return
+		}
+		var req struct {
+			EnableChat      *bool   `json:"enableChat"`
+			EnableHeartbeat *bool   `json:"enableHeartbeat"`
+			EnableCron      *bool   `json:"enableCron"`
+			EnableSubagent  *bool   `json:"enableSubagent"`
+			DedupeWindowSec *int    `json:"dedupeWindowSec"`
+			DefaultColumnID *string `json:"defaultColumnId"`
+		}
+		if err := readJSON(r.Body, &req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.EnableChat != nil {
+			current.EnableChat = *req.EnableChat
+		}
+		if req.EnableHeartbeat != nil {
+			current.EnableHeartbeat = *req.EnableHeartbeat
+		}
+		if req.EnableCron != nil {
+			current.EnableCron = *req.EnableCron
+		}
+		if req.EnableSubagent != nil {
+			current.EnableSubagent = *req.EnableSubagent
+		}
+		if req.DedupeWindowSec != nil {
+			current.DedupeWindowSec = *req.DedupeWindowSec
+		}
+		if req.DefaultColumnID != nil {
+			current.DefaultColumnID = strings.TrimSpace(*req.DefaultColumnID)
+		}
+		policy, err := s.mission.SetTaskPolicy(r.Context(), current)
+		if err != nil {
+			writeManageError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"policy": policy})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 func (s *Server) handleManageKanbanColumns(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPut {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -344,12 +400,51 @@ func (s *Server) handleManageAnalyticsLogs(w http.ResponseWriter, r *http.Reques
 			limit = parsed
 		}
 	}
-	out, err := s.mission.AnalyticsLogs(r.Context(), limit)
+	var from *time.Time
+	if raw := strings.TrimSpace(r.URL.Query().Get("from")); raw != "" {
+		parsed, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			http.Error(w, "invalid from (RFC3339 expected)", http.StatusBadRequest)
+			return
+		}
+		parsed = parsed.UTC()
+		from = &parsed
+	}
+	var to *time.Time
+	if raw := strings.TrimSpace(r.URL.Query().Get("to")); raw != "" {
+		parsed, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			http.Error(w, "invalid to (RFC3339 expected)", http.StatusBadRequest)
+			return
+		}
+		parsed = parsed.UTC()
+		to = &parsed
+	}
+	out, err := s.mission.AnalyticsLogsFiltered(r.Context(), AnalyticsLogFilter{
+		Type:  strings.TrimSpace(r.URL.Query().Get("type")),
+		From:  from,
+		To:    to,
+		Limit: limit,
+	})
 	if err != nil {
 		writeManageError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"logs": out})
+}
+
+func (s *Server) handleManageAnalyticsSummary(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	rangeName := strings.TrimSpace(r.URL.Query().Get("range"))
+	out, err := s.mission.AnalyticsSummary(r.Context(), rangeName)
+	if err != nil {
+		writeManageError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleManageSettings(w http.ResponseWriter, r *http.Request) {
@@ -358,6 +453,76 @@ func (s *Server) handleManageSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.mission.Settings())
+}
+
+func (s *Server) handleManageSettingsProviders(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	settings := s.mission.Settings()
+	writeJSON(w, http.StatusOK, map[string]any{"providers": settings.Providers})
+}
+
+func (s *Server) handleManageSettingsProviderByID(w http.ResponseWriter, r *http.Request) {
+	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/manage/settings/providers/"), "/")
+	if rest == "" {
+		http.NotFound(w, r)
+		return
+	}
+	if rest == "active" {
+		if r.Method != http.MethodPut {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			Provider string `json:"provider"`
+		}
+		if err := readJSON(r.Body, &req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		out, err := s.mission.ActivateProvider(r.Context(), req.Provider)
+		if err != nil {
+			writeManageError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
+	providerID := rest
+	switch r.Method {
+	case http.MethodPut:
+		var req struct {
+			APIKey   string `json:"apiKey"`
+			APIBase  string `json:"apiBase"`
+			Model    string `json:"model"`
+			Activate bool   `json:"activate"`
+		}
+		if err := readJSON(r.Body, &req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		out, err := s.mission.UpdateProvider(r.Context(), providerID, config.ProviderConfig{
+			APIKey:  strings.TrimSpace(req.APIKey),
+			APIBase: strings.TrimSpace(req.APIBase),
+			Model:   strings.TrimSpace(req.Model),
+		}, req.Activate, false)
+		if err != nil {
+			writeManageError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, out)
+	case http.MethodDelete:
+		out, err := s.mission.UpdateProvider(r.Context(), providerID, config.ProviderConfig{}, false, true)
+		if err != nil {
+			writeManageError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, out)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 func (s *Server) handleManageSettingsProviderTest(w http.ResponseWriter, r *http.Request) {
@@ -410,6 +575,76 @@ func (s *Server) handleManageSettingsProvider(w http.ResponseWriter, r *http.Req
 		APIBase: strings.TrimSpace(req.APIBase),
 		Model:   strings.TrimSpace(req.Model),
 	}, req.Activate, req.Remove)
+	if err != nil {
+		writeManageError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleManageSettingsChannels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"channels": s.mission.Channels()})
+}
+
+func (s *Server) handleManageSettingsChannelByID(w http.ResponseWriter, r *http.Request) {
+	channelID := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/manage/settings/channels/"), "/")
+	if channelID == "" {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodPut {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if strings.EqualFold(channelID, "telegram") {
+		var req struct {
+			Enabled   bool     `json:"enabled"`
+			Token     string   `json:"token"`
+			AllowFrom []string `json:"allowFrom"`
+		}
+		if err := readJSON(r.Body, &req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		out, err := s.mission.UpdateChannel(r.Context(), "telegram", &config.TelegramConfig{
+			Enabled:   req.Enabled,
+			Token:     strings.TrimSpace(req.Token),
+			AllowFrom: req.AllowFrom,
+		}, nil)
+		if err != nil {
+			writeManageError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
+
+	var req struct {
+		Label     string            `json:"label"`
+		Kind      string            `json:"kind"`
+		Enabled   bool              `json:"enabled"`
+		Endpoint  string            `json:"endpoint"`
+		AuthToken string            `json:"authToken"`
+		Headers   map[string]string `json:"headers"`
+		Metadata  map[string]string `json:"metadata"`
+	}
+	if err := readJSON(r.Body, &req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	out, err := s.mission.UpdateChannel(r.Context(), channelID, nil, &config.GenericChannelConfig{
+		Label:     strings.TrimSpace(req.Label),
+		Kind:      strings.TrimSpace(req.Kind),
+		Enabled:   req.Enabled,
+		Endpoint:  strings.TrimSpace(req.Endpoint),
+		AuthToken: strings.TrimSpace(req.AuthToken),
+		Headers:   req.Headers,
+		Metadata:  req.Metadata,
+	})
 	if err != nil {
 		writeManageError(w, err)
 		return
@@ -478,6 +713,37 @@ func (s *Server) handleManageSettingsPassword(w http.ResponseWriter, r *http.Req
 		return
 	}
 	out, err := s.mission.UpdatePassword(r.Context(), req.CurrentPassword, req.NewPassword, s.passwordMinLength)
+	if err != nil {
+		writeManageError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleManageSnapshotExport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	out, err := s.mission.SnapshotExport(r.Context())
+	if err != nil {
+		writeManageError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleManageSnapshotImport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req map[string]any
+	if err := readJSON(r.Body, &req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	out, err := s.mission.SnapshotImport(r.Context(), req)
 	if err != nil {
 		writeManageError(w, err)
 		return

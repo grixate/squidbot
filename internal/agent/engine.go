@@ -13,8 +13,8 @@ import (
 	"github.com/oklog/ulid/v2"
 
 	"github.com/grixate/squidbot/internal/config"
-	"github.com/grixate/squidbot/internal/mission"
 	"github.com/grixate/squidbot/internal/memory"
+	"github.com/grixate/squidbot/internal/mission"
 	"github.com/grixate/squidbot/internal/provider"
 	"github.com/grixate/squidbot/internal/runtime/actor"
 	"github.com/grixate/squidbot/internal/telemetry"
@@ -43,6 +43,7 @@ type Engine struct {
 	policy   *tools.PathPolicy
 	memory   *memory.Manager
 	ulidMu   sync.Mutex
+	stateMu  sync.RWMutex
 	entropy  *ulid.MonotonicEntropy
 }
 
@@ -154,6 +155,41 @@ func (e *Engine) nextID() string {
 	return ulid.MustNew(ulid.Timestamp(time.Now()), e.entropy).String()
 }
 
+func (e *Engine) currentConfig() config.Config {
+	e.stateMu.RLock()
+	defer e.stateMu.RUnlock()
+	return e.cfg
+}
+
+func (e *Engine) currentProviderModel() (provider.LLMProvider, string) {
+	e.stateMu.RLock()
+	defer e.stateMu.RUnlock()
+	return e.provider, e.model
+}
+
+func (e *Engine) ApplyProviderConfig(providerName string, providerCfg config.ProviderConfig) error {
+	normalized, ok := config.NormalizeProviderName(providerName)
+	if !ok {
+		return fmt.Errorf("unsupported provider %q", providerName)
+	}
+	if err := config.ValidateProviderDraft(normalized, providerCfg); err != nil {
+		return err
+	}
+	next := e.currentConfig()
+	next.Providers.Active = normalized
+	_ = next.SetProviderByName(normalized, providerCfg)
+	client, model, err := provider.FromConfig(next)
+	if err != nil {
+		return err
+	}
+	e.stateMu.Lock()
+	e.cfg = next
+	e.provider = client
+	e.model = model
+	e.stateMu.Unlock()
+	return nil
+}
+
 func (e *Engine) newSessionHandler(sessionID string) (actor.SessionHandler, error) {
 	h := &sessionHandler{engine: e, sessionID: sessionID}
 	if checkpoint, err := e.store.LoadCheckpoint(context.Background(), sessionID); err == nil && len(checkpoint) > 0 {
@@ -194,7 +230,8 @@ func (h *sessionHandler) process(ctx context.Context, msg InboundMessage) (strin
 	h.engine.metrics.ActiveTurns.Add(1)
 	defer h.engine.metrics.ActiveTurns.Add(-1)
 
-	turnTimeout := time.Duration(h.engine.cfg.Agents.Defaults.TurnTimeoutSec) * time.Second
+	cfg := h.engine.currentConfig()
+	turnTimeout := time.Duration(cfg.Agents.Defaults.TurnTimeoutSec) * time.Second
 	if turnTimeout <= 0 {
 		turnTimeout = 120 * time.Second
 	}
@@ -205,14 +242,14 @@ func (h *sessionHandler) process(ctx context.Context, msg InboundMessage) (strin
 	if err != nil {
 		return "", err
 	}
-	systemPrompt := buildSystemPrompt(h.engine.cfg, msg.Content)
+	systemPrompt := buildSystemPrompt(cfg, msg.Content)
 	messages := buildMessages(systemPrompt, history, msg.Content)
 	registry, err := h.engine.buildRegistry(msg)
 	if err != nil {
 		return "", err
 	}
 
-	maxHops := h.engine.cfg.Agents.Defaults.MaxToolIterations
+	maxHops := cfg.Agents.Defaults.MaxToolIterations
 	if maxHops <= 0 {
 		maxHops = 20
 	}
@@ -220,12 +257,13 @@ func (h *sessionHandler) process(ctx context.Context, msg InboundMessage) (strin
 
 	for i := 0; i < maxHops; i++ {
 		h.engine.metrics.ProviderCalls.Add(1)
-		response, chatErr := h.engine.provider.Chat(turnCtx, provider.ChatRequest{
+		providerClient, model := h.engine.currentProviderModel()
+		response, chatErr := providerClient.Chat(turnCtx, provider.ChatRequest{
 			Messages:    messages,
 			Tools:       registry.Definitions(),
-			Model:       h.engine.model,
-			MaxTokens:   h.engine.cfg.Agents.Defaults.MaxTokens,
-			Temperature: h.engine.cfg.Agents.Defaults.Temperature,
+			Model:       model,
+			MaxTokens:   cfg.Agents.Defaults.MaxTokens,
+			Temperature: cfg.Agents.Defaults.Temperature,
 		})
 		if chatErr != nil {
 			h.engine.metrics.ProviderErrors.Add(1)
@@ -237,7 +275,7 @@ func (h *sessionHandler) process(ctx context.Context, msg InboundMessage) (strin
 			messages = append(messages, provider.Message{Role: "assistant", Content: response.Content, ToolCalls: response.ToolCalls})
 			for _, tc := range response.ToolCalls {
 				h.engine.metrics.ToolCalls.Add(1)
-				toolTimeout := time.Duration(h.engine.cfg.Agents.Defaults.ToolTimeoutSec) * time.Second
+				toolTimeout := time.Duration(cfg.Agents.Defaults.ToolTimeoutSec) * time.Second
 				if toolTimeout <= 0 {
 					toolTimeout = 60 * time.Second
 				}
@@ -355,13 +393,14 @@ func suggestsFollowUp(content string) bool {
 }
 
 func (e *Engine) buildRegistry(msg InboundMessage) (*tools.Registry, error) {
+	cfg := e.currentConfig()
 	registry := tools.NewRegistry()
 	registry.Register(tools.NewReadFileTool(e.policy))
 	registry.Register(tools.NewWriteFileTool(e.policy))
 	registry.Register(tools.NewEditFileTool(e.policy))
 	registry.Register(tools.NewListDirTool(e.policy))
-	registry.Register(tools.NewExecTool(e.policy, time.Duration(e.cfg.Agents.Defaults.ToolTimeoutSec)*time.Second))
-	registry.Register(tools.NewWebSearchTool(e.cfg.Tools.Web.Search.APIKey, e.cfg.Tools.Web.Search.MaxResults))
+	registry.Register(tools.NewExecTool(e.policy, time.Duration(cfg.Agents.Defaults.ToolTimeoutSec)*time.Second))
+	registry.Register(tools.NewWebSearchTool(cfg.Tools.Web.Search.APIKey, cfg.Tools.Web.Search.MaxResults))
 	registry.Register(tools.NewWebFetchTool(50000))
 
 	messageTool := tools.NewMessageTool(func(ctx context.Context, channel, chatID, content string) error {
@@ -425,6 +464,7 @@ func (e *Engine) spawnSubtask(ctx context.Context, req tools.SpawnRequest) (stri
 }
 
 func (e *Engine) runSubtask(ctx context.Context, task string) (string, error) {
+	cfg := e.currentConfig()
 	messages := []provider.Message{
 		{Role: "system", Content: "You are a background subagent. Complete only the assigned task and return a concise summary."},
 		{Role: "user", Content: task},
@@ -433,18 +473,19 @@ func (e *Engine) runSubtask(ctx context.Context, task string) (string, error) {
 	registry.Register(tools.NewReadFileTool(e.policy))
 	registry.Register(tools.NewWriteFileTool(e.policy))
 	registry.Register(tools.NewListDirTool(e.policy))
-	registry.Register(tools.NewExecTool(e.policy, time.Duration(e.cfg.Agents.Defaults.ToolTimeoutSec)*time.Second))
-	registry.Register(tools.NewWebSearchTool(e.cfg.Tools.Web.Search.APIKey, e.cfg.Tools.Web.Search.MaxResults))
+	registry.Register(tools.NewExecTool(e.policy, time.Duration(cfg.Agents.Defaults.ToolTimeoutSec)*time.Second))
+	registry.Register(tools.NewWebSearchTool(cfg.Tools.Web.Search.APIKey, cfg.Tools.Web.Search.MaxResults))
 	registry.Register(tools.NewWebFetchTool(30000))
 
 	for i := 0; i < 15; i++ {
 		e.metrics.ProviderCalls.Add(1)
-		resp, err := e.provider.Chat(ctx, provider.ChatRequest{
+		providerClient, model := e.currentProviderModel()
+		resp, err := providerClient.Chat(ctx, provider.ChatRequest{
 			Messages:    messages,
 			Tools:       registry.Definitions(),
-			Model:       e.model,
-			MaxTokens:   e.cfg.Agents.Defaults.MaxTokens,
-			Temperature: e.cfg.Agents.Defaults.Temperature,
+			Model:       model,
+			MaxTokens:   cfg.Agents.Defaults.MaxTokens,
+			Temperature: cfg.Agents.Defaults.Temperature,
 		})
 		if err != nil {
 			e.metrics.ProviderErrors.Add(1)
@@ -475,19 +516,6 @@ func (e *Engine) createMissionTask(ctx context.Context, req tools.CreateTaskRequ
 	if title == "" {
 		return tools.TaskResult{}, fmt.Errorf("title is required")
 	}
-	columns, err := e.ensureMissionColumns(ctx)
-	if err != nil {
-		return tools.TaskResult{}, err
-	}
-	columnID := strings.TrimSpace(req.ColumnID)
-	if columnID == "" {
-		columnID = mission.ColumnBacklog
-	}
-	if _, ok := columns[columnID]; !ok {
-		columnID = mission.ColumnBacklog
-	}
-
-	now := time.Now().UTC()
 	source := mission.TaskSource{
 		Type:      sourceTypeFromContext(req.Channel, req.SessionID, req.Trigger),
 		SessionID: req.SessionID,
@@ -496,13 +524,37 @@ func (e *Engine) createMissionTask(ctx context.Context, req tools.CreateTaskRequ
 		RequestID: req.RequestID,
 		Trigger:   req.Trigger,
 	}
+	policy, err := e.store.GetTaskAutomationPolicy(ctx)
+	if err != nil {
+		return tools.TaskResult{}, err
+	}
+	if !policy.EnabledForSource(source.Type) {
+		return tools.TaskResult{}, fmt.Errorf("task creation disabled for source %q", source.Type)
+	}
+
+	columns, err := e.ensureMissionColumns(ctx)
+	if err != nil {
+		return tools.TaskResult{}, err
+	}
+	columnID := strings.TrimSpace(req.ColumnID)
+	if columnID == "" {
+		columnID = strings.TrimSpace(policy.DefaultColumnID)
+		if columnID == "" {
+			columnID = mission.ColumnBacklog
+		}
+	}
+	if _, ok := columns[columnID]; !ok {
+		columnID = mission.ColumnBacklog
+	}
+
+	now := time.Now().UTC()
 	normalized := mission.NormalizeTaskTitle(title)
 	all, err := e.store.ListMissionTasks(ctx)
 	if err != nil {
 		return tools.TaskResult{}, err
 	}
 
-	const dedupeWindow = 6 * time.Hour
+	dedupeWindow := policy.DedupeWindow()
 	for _, candidate := range all {
 		if mission.NormalizeTaskTitle(candidate.Title) != normalized {
 			continue

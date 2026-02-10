@@ -55,13 +55,24 @@ type ProviderConfig struct {
 }
 
 type ChannelsConfig struct {
-	Telegram TelegramConfig `json:"telegram"`
+	Telegram  TelegramConfig                  `json:"telegram"`
+	Scaffolds map[string]GenericChannelConfig `json:"scaffolds,omitempty"`
 }
 
 type TelegramConfig struct {
 	Enabled   bool     `json:"enabled"`
 	Token     string   `json:"token"`
 	AllowFrom []string `json:"allowFrom"`
+}
+
+type GenericChannelConfig struct {
+	Label     string            `json:"label,omitempty"`
+	Kind      string            `json:"kind,omitempty"`
+	Enabled   bool              `json:"enabled"`
+	Endpoint  string            `json:"endpoint,omitempty"`
+	AuthToken string            `json:"authToken,omitempty"`
+	Headers   map[string]string `json:"headers,omitempty"`
+	Metadata  map[string]string `json:"metadata,omitempty"`
 }
 
 type ToolsConfig struct {
@@ -185,6 +196,7 @@ func Default() Config {
 				Enabled:   false,
 				AllowFrom: []string{},
 			},
+			Scaffolds: map[string]GenericChannelConfig{},
 		},
 		Tools: ToolsConfig{
 			Web: WebToolsConfig{

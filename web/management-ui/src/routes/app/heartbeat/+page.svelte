@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { Button } from 'bits-ui';
+  import { UIButton } from '$lib/components/ui';
   import { fetchJSON, parseError } from '$lib/http';
+  import { formatDateTime } from '$lib/utils/time';
 
   type HeartbeatRun = {
     id: string;
@@ -86,17 +87,17 @@
   </header>
 
   {#if loading}
-    <p class="muted">Loading...</p>
+    <p class="muted">Loading…</p>
   {:else}
     <div class="panel">
       <p><strong>Runtime:</strong> {runtimeOnline ? 'Online' : 'Offline'}</p>
       <p><strong>Service:</strong> {running ? 'Running' : 'Stopped'}</p>
-      <p><strong>Next Run:</strong> {nextRunAt || 'n/a'}</p>
+      <p><strong>Next Run:</strong> {formatDateTime(nextRunAt)}</p>
       <label for="interval">Beat Interval (seconds)</label>
       <input id="interval" name="heartbeat_interval" bind:value={intervalSec} type="number" min="1" />
       <div class="inline">
-        <Button.Root type="button" onclick={saveInterval}>Save Interval</Button.Root>
-        <Button.Root type="button" onclick={triggerNow} disabled={!runtimeOnline}>Trigger Now</Button.Root>
+        <UIButton type="button" onclick={saveInterval}>Save Interval</UIButton>
+        <UIButton type="button" onclick={triggerNow} disabled={!runtimeOnline}>Trigger Now</UIButton>
       </div>
       {#if lastResult}
         <p class="muted">{lastResult}</p>
@@ -111,7 +112,7 @@
         <ul class="run-list">
           {#each recentRuns as run}
             <li>
-              <p><strong>{run.status}</strong> / {run.triggered_by} / {run.started_at}</p>
+              <p><strong>{run.status}</strong> / {run.triggered_by} / {formatDateTime(run.started_at)}</p>
               {#if run.preview}
                 <p>{run.preview}</p>
               {/if}

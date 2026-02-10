@@ -95,4 +95,5 @@ type MissionStore interface {
 	ReplaceMissionColumns(ctx context.Context, columns []mission.Column) error
 	ListMissionColumns(ctx context.Context) ([]mission.Column, error)
 	RecordUsageDay(ctx context.Context, day string, promptTokens, completionTokens, totalTokens uint64) error
+	GetTaskAutomationPolicy(ctx context.Context) (mission.TaskAutomationPolicy, error)
 }

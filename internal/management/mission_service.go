@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -30,6 +31,7 @@ type MissionControlService struct {
 	configPath   string
 	metrics      *telemetry.Metrics
 	heartbeat    HeartbeatRuntime
+	runtime      RuntimeController
 	logger       *log.Logger
 	getConfig    func() config.Config
 	saveConfig   func(next config.Config) error
@@ -55,27 +57,27 @@ type KanbanBoard struct {
 }
 
 type CreateTaskInput struct {
-	Title       string              `json:"title"`
-	Description string              `json:"description"`
-	ColumnID    string              `json:"columnId"`
-	Priority    string              `json:"priority"`
-	Assignee    string              `json:"assignee"`
-	Notes       string              `json:"notes"`
-	DueAt       *time.Time          `json:"dueAt,omitempty"`
-	Source      mission.TaskSource  `json:"source"`
-	Dedupe      bool                `json:"dedupe"`
-	Metadata    map[string]any      `json:"metadata,omitempty"`
+	Title       string             `json:"title"`
+	Description string             `json:"description"`
+	ColumnID    string             `json:"columnId"`
+	Priority    string             `json:"priority"`
+	Assignee    string             `json:"assignee"`
+	Notes       string             `json:"notes"`
+	DueAt       *time.Time         `json:"dueAt,omitempty"`
+	Source      mission.TaskSource `json:"source"`
+	Dedupe      bool               `json:"dedupe"`
+	Metadata    map[string]any     `json:"metadata,omitempty"`
 }
 
 type UpdateTaskInput struct {
-	Title       *string     `json:"title,omitempty"`
-	Description *string     `json:"description,omitempty"`
-	ColumnID    *string     `json:"columnId,omitempty"`
-	Priority    *string     `json:"priority,omitempty"`
-	Assignee    *string     `json:"assignee,omitempty"`
-	Notes       *string     `json:"notes,omitempty"`
-	DueAt       *time.Time  `json:"dueAt,omitempty"`
-	ClearDueAt  bool        `json:"clearDueAt,omitempty"`
+	Title       *string    `json:"title,omitempty"`
+	Description *string    `json:"description,omitempty"`
+	ColumnID    *string    `json:"columnId,omitempty"`
+	Priority    *string    `json:"priority,omitempty"`
+	Assignee    *string    `json:"assignee,omitempty"`
+	Notes       *string    `json:"notes,omitempty"`
+	DueAt       *time.Time `json:"dueAt,omitempty"`
+	ClearDueAt  bool       `json:"clearDueAt,omitempty"`
 }
 
 type ConfigSnapshot struct {
@@ -95,6 +97,7 @@ type ConfigSnapshot struct {
 			TokenSet  bool     `json:"tokenSet"`
 			AllowFrom []string `json:"allowFrom"`
 		} `json:"telegram"`
+		Scaffolds map[string]config.GenericChannelConfig `json:"scaffolds,omitempty"`
 	} `json:"channels"`
 	Runtime struct {
 		HeartbeatIntervalSec int `json:"heartbeatIntervalSec"`
@@ -106,6 +109,22 @@ type ConfigSnapshot struct {
 		PublicBaseURL  string `json:"publicBaseUrl"`
 		ServeInGateway bool   `json:"serveInGateway"`
 	} `json:"management"`
+}
+
+type ChannelDescriptor struct {
+	ID              string                       `json:"id"`
+	Label           string                       `json:"label"`
+	Kind            string                       `json:"kind"`
+	RuntimeHotApply bool                         `json:"runtimeHotApply"`
+	Config          map[string]any               `json:"config,omitempty"`
+	Scaffold        *config.GenericChannelConfig `json:"scaffold,omitempty"`
+}
+
+type AnalyticsLogFilter struct {
+	Type  string
+	From  *time.Time
+	To    *time.Time
+	Limit int
 }
 
 type FileDescriptor struct {
@@ -129,6 +148,7 @@ func NewMissionControlService(
 	configPath string,
 	metrics *telemetry.Metrics,
 	heartbeat HeartbeatRuntime,
+	runtime RuntimeController,
 	logger *log.Logger,
 	getCfg func() config.Config,
 	saveCfg func(next config.Config) error,
@@ -164,6 +184,7 @@ func NewMissionControlService(
 		configPath:   configPath,
 		metrics:      metrics,
 		heartbeat:    heartbeat,
+		runtime:      runtime,
 		logger:       logger,
 		getConfig:    getCfg,
 		saveConfig:   saveCfg,
@@ -297,6 +318,12 @@ func (s *MissionControlService) CreateTask(ctx context.Context, in CreateTaskInp
 	if err != nil {
 		return mission.Task{}, false, err
 	}
+	policy := mission.DefaultTaskAutomationPolicy(now)
+	if in.Dedupe {
+		if stored, policyErr := s.store.GetTaskAutomationPolicy(ctx); policyErr == nil {
+			policy = stored
+		}
+	}
 
 	if in.Dedupe {
 		normalizedTitle := mission.NormalizeTaskTitle(in.Title)
@@ -310,7 +337,7 @@ func (s *MissionControlService) CreateTask(ctx context.Context, in CreateTaskInp
 			if strings.TrimSpace(in.Source.SessionID) != "" && task.Source.SessionID != in.Source.SessionID {
 				continue
 			}
-			if now.Sub(task.CreatedAt) > 6*time.Hour {
+			if now.Sub(task.CreatedAt) > policy.DedupeWindow() {
 				continue
 			}
 			task.UpdatedAt = now
@@ -592,6 +619,49 @@ func (s *MissionControlService) SetColumns(ctx context.Context, columns []missio
 	return columns, nil
 }
 
+func (s *MissionControlService) TaskPolicy(ctx context.Context) (mission.TaskAutomationPolicy, error) {
+	policy, err := s.store.GetTaskAutomationPolicy(ctx)
+	if err != nil {
+		return mission.TaskAutomationPolicy{}, err
+	}
+	if strings.TrimSpace(policy.DefaultColumnID) == "" {
+		policy.DefaultColumnID = mission.ColumnBacklog
+	}
+	if policy.DedupeWindowSec <= 0 {
+		policy.DedupeWindowSec = int((6 * time.Hour).Seconds())
+	}
+	return policy, nil
+}
+
+func (s *MissionControlService) SetTaskPolicy(ctx context.Context, in mission.TaskAutomationPolicy) (mission.TaskAutomationPolicy, error) {
+	policy := in
+	if strings.TrimSpace(policy.DefaultColumnID) == "" {
+		policy.DefaultColumnID = mission.ColumnBacklog
+	}
+	if policy.DedupeWindowSec <= 0 {
+		policy.DedupeWindowSec = int((6 * time.Hour).Seconds())
+	}
+	columns, err := s.ensureColumns(ctx)
+	if err != nil {
+		return mission.TaskAutomationPolicy{}, err
+	}
+	validColumn := false
+	for _, column := range columns {
+		if column.ID == policy.DefaultColumnID {
+			validColumn = true
+			break
+		}
+	}
+	if !validColumn {
+		return mission.TaskAutomationPolicy{}, fmt.Errorf("defaultColumnId must be an existing column")
+	}
+	policy.UpdatedAt = time.Now().UTC()
+	if err := s.store.PutTaskAutomationPolicy(ctx, policy); err != nil {
+		return mission.TaskAutomationPolicy{}, err
+	}
+	return policy, nil
+}
+
 func (s *MissionControlService) HeartbeatStatus(ctx context.Context) (map[string]any, error) {
 	_ = ctx
 	out := map[string]any{
@@ -753,53 +823,155 @@ func (s *MissionControlService) AnalyticsHealth(ctx context.Context) (map[string
 }
 
 func (s *MissionControlService) AnalyticsLogs(ctx context.Context, limit int) ([]map[string]any, error) {
-	toolEvents, err := s.store.ListToolEvents(ctx, limit)
+	return s.AnalyticsLogsFiltered(ctx, AnalyticsLogFilter{Limit: limit})
+}
+
+func (s *MissionControlService) AnalyticsLogsFiltered(ctx context.Context, filter AnalyticsLogFilter) ([]map[string]any, error) {
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	fetchLimit := limit
+	if fetchLimit < 1000 {
+		fetchLimit = 1000
+	}
+	toolEvents, err := s.store.ListToolEvents(ctx, fetchLimit)
 	if err != nil {
 		return nil, err
 	}
-	jobRuns, err := s.store.ListJobRuns(ctx, limit)
+	jobRuns, err := s.store.ListJobRuns(ctx, fetchLimit)
 	if err != nil {
 		return nil, err
 	}
-	heartbeatRuns, err := s.store.ListHeartbeatRuns(ctx, limit)
+	heartbeatRuns, err := s.store.ListHeartbeatRuns(ctx, fetchLimit)
 	if err != nil {
 		return nil, err
 	}
 	records := make([]map[string]any, 0, len(toolEvents)+len(jobRuns)+len(heartbeatRuns))
+	filterType := strings.TrimSpace(strings.ToLower(filter.Type))
 	for _, event := range toolEvents {
-		records = append(records, map[string]any{
+		record := map[string]any{
 			"type":      "tool",
 			"name":      event.ToolName,
 			"sessionId": event.SessionID,
 			"summary":   truncateLine(event.Output, 180),
 			"createdAt": event.CreatedAt.UTC().Format(time.RFC3339),
-		})
+		}
+		if includeAnalyticsRecord(record, filterType, filter.From, filter.To) {
+			records = append(records, record)
+		}
 	}
 	for _, run := range jobRuns {
-		records = append(records, map[string]any{
+		record := map[string]any{
 			"type":      "cron",
 			"jobId":     run["job_id"],
 			"createdAt": toRFC3339(run["run_at"]),
 			"summary":   truncateLine(fmt.Sprint(run["result"]), 180),
 			"error":     fmt.Sprint(run["error"]),
-		})
+		}
+		if includeAnalyticsRecord(record, filterType, filter.From, filter.To) {
+			records = append(records, record)
+		}
 	}
 	for _, run := range heartbeatRuns {
-		records = append(records, map[string]any{
+		record := map[string]any{
 			"type":      "heartbeat",
 			"status":    run.Status,
 			"createdAt": run.StartedAt.UTC().Format(time.RFC3339),
 			"summary":   truncateLine(run.Preview, 180),
 			"error":     run.Error,
-		})
+		}
+		if includeAnalyticsRecord(record, filterType, filter.From, filter.To) {
+			records = append(records, record)
+		}
 	}
 	sort.Slice(records, func(i, j int) bool {
 		return fmt.Sprint(records[i]["createdAt"]) > fmt.Sprint(records[j]["createdAt"])
 	})
-	if limit > 0 && len(records) > limit {
+	if len(records) > limit {
 		records = records[:limit]
 	}
 	return records, nil
+}
+
+func (s *MissionControlService) AnalyticsSummary(ctx context.Context, rangeName string) (map[string]any, error) {
+	_ = ctx
+	normalized := strings.TrimSpace(strings.ToLower(rangeName))
+	days := 7
+	if normalized == "30d" {
+		days = 30
+		normalized = "30d"
+	} else {
+		normalized = "7d"
+	}
+	now := time.Now().UTC()
+	start := now.AddDate(0, 0, -(days - 1))
+	startDay := start.Format("2006-01-02")
+
+	usageDays, err := s.store.ListUsageDays(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	tokenTotal := uint64(0)
+	tokenByDay := make(map[string]uint64, days)
+	for _, usage := range usageDays {
+		if usage.Day < startDay {
+			continue
+		}
+		tokenTotal += usage.TotalTokens
+		tokenByDay[usage.Day] = usage.TotalTokens
+	}
+
+	logs, err := s.AnalyticsLogsFiltered(context.Background(), AnalyticsLogFilter{
+		From:  &start,
+		To:    &now,
+		Limit: 5000,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	totals := map[string]int{
+		"tool_events":     0,
+		"cron_runs":       0,
+		"heartbeat_runs":  0,
+		"errors":          0,
+		"provider_errors": int(s.metrics.Snapshot()["provider_errors"]),
+		"tool_errors":     int(s.metrics.Snapshot()["tool_errors"]),
+		"heartbeat_total": int(s.metrics.Snapshot()["heartbeat_executions"]),
+		"cron_total":      int(s.metrics.Snapshot()["cron_executions"]),
+	}
+	for _, row := range logs {
+		rowType := strings.TrimSpace(strings.ToLower(fmt.Sprint(row["type"])))
+		switch rowType {
+		case "tool":
+			totals["tool_events"]++
+		case "cron":
+			totals["cron_runs"]++
+		case "heartbeat":
+			totals["heartbeat_runs"]++
+		}
+		if strings.TrimSpace(fmt.Sprint(row["error"])) != "" && strings.TrimSpace(fmt.Sprint(row["error"])) != "<nil>" {
+			totals["errors"]++
+		}
+	}
+
+	series := make([]map[string]any, 0, days)
+	for i := 0; i < days; i++ {
+		day := start.AddDate(0, 0, i).Format("2006-01-02")
+		series = append(series, map[string]any{
+			"day":         day,
+			"token_total": tokenByDay[day],
+		})
+	}
+	return map[string]any{
+		"range":      normalized,
+		"from":       start.Format(time.RFC3339),
+		"to":         now.Format(time.RFC3339),
+		"totals":     totals,
+		"tokenTotal": tokenTotal,
+		"series":     series,
+	}, nil
 }
 
 func (s *MissionControlService) Settings() ConfigSnapshot {
@@ -826,12 +998,50 @@ func (s *MissionControlService) Settings() ConfigSnapshot {
 	out.Channels.Telegram.Enabled = cfg.Channels.Telegram.Enabled
 	out.Channels.Telegram.TokenSet = strings.TrimSpace(cfg.Channels.Telegram.Token) != ""
 	out.Channels.Telegram.AllowFrom = cfg.Channels.Telegram.AllowFrom
+	if len(cfg.Channels.Scaffolds) > 0 {
+		out.Channels.Scaffolds = make(map[string]config.GenericChannelConfig, len(cfg.Channels.Scaffolds))
+		for id, scaffold := range cfg.Channels.Scaffolds {
+			copyScaffold := scaffold
+			copyScaffold.AuthToken = ""
+			out.Channels.Scaffolds[id] = copyScaffold
+		}
+	}
 	out.Runtime.HeartbeatIntervalSec = cfg.Runtime.HeartbeatIntervalSec
 	out.Runtime.MailboxSize = cfg.Runtime.MailboxSize
 	out.Management.Host = cfg.Management.Host
 	out.Management.Port = cfg.Management.Port
 	out.Management.PublicBaseURL = cfg.Management.PublicBaseURL
 	out.Management.ServeInGateway = cfg.Management.ServeInGateway
+	return out
+}
+
+func (s *MissionControlService) Channels() []ChannelDescriptor {
+	cfg := s.getConfig()
+	out := []ChannelDescriptor{
+		{
+			ID:              "telegram",
+			Label:           "Telegram",
+			Kind:            "telegram",
+			RuntimeHotApply: true,
+			Config: map[string]any{
+				"enabled":   cfg.Channels.Telegram.Enabled,
+				"tokenSet":  strings.TrimSpace(cfg.Channels.Telegram.Token) != "",
+				"allowFrom": cfg.Channels.Telegram.AllowFrom,
+			},
+		},
+	}
+	for id, scaffold := range cfg.Channels.Scaffolds {
+		copyScaffold := scaffold
+		copyScaffold.AuthToken = ""
+		out = append(out, ChannelDescriptor{
+			ID:              id,
+			Label:           strings.TrimSpace(copyScaffold.Label),
+			Kind:            "scaffold",
+			RuntimeHotApply: false,
+			Scaffold:        &copyScaffold,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
 }
 
@@ -843,12 +1053,12 @@ func (s *MissionControlService) TestProvider(ctx context.Context, providerName s
 }
 
 func (s *MissionControlService) UpdateProvider(ctx context.Context, providerName string, draft config.ProviderConfig, activate bool, remove bool) (map[string]any, error) {
-	_ = ctx
 	cfg := s.getConfig()
 	normalized, ok := config.NormalizeProviderName(providerName)
 	if !ok {
 		return nil, fmt.Errorf("unsupported provider %q", providerName)
 	}
+
 	if remove {
 		_ = cfg.SetProviderByName(normalized, config.ProviderConfig{})
 		if cfg.Providers.Active == normalized {
@@ -857,26 +1067,57 @@ func (s *MissionControlService) UpdateProvider(ctx context.Context, providerName
 		if err := s.saveConfig(cfg); err != nil {
 			return nil, err
 		}
-		return map[string]any{"ok": true, "restartRequired": true}, nil
+		return map[string]any{"ok": true, "runtimeApplied": false, "restartRequired": false}, nil
 	}
+
 	if err := config.ValidateProviderDraft(normalized, draft); err != nil {
 		return nil, err
 	}
 	_ = cfg.SetProviderByName(normalized, draft)
+
+	runtimeApplied := false
+	runtimeError := ""
 	if activate {
 		cfg.Providers.Active = normalized
 		if err := config.ValidateActiveProvider(cfg); err != nil {
 			return nil, err
 		}
+		if s.runtime != nil {
+			if err := s.runtime.ApplyProvider(ctx, normalized, draft); err != nil {
+				runtimeError = err.Error()
+			} else {
+				runtimeApplied = true
+			}
+		}
 	}
 	if err := s.saveConfig(cfg); err != nil {
 		return nil, err
 	}
-	return map[string]any{"ok": true, "restartRequired": true}, nil
+	out := map[string]any{
+		"ok":              true,
+		"runtimeApplied":  runtimeApplied,
+		"restartRequired": activate && !runtimeApplied,
+	}
+	if runtimeError != "" {
+		out["runtimeError"] = runtimeError
+	}
+	return out, nil
+}
+
+func (s *MissionControlService) ActivateProvider(ctx context.Context, providerName string) (map[string]any, error) {
+	cfg := s.getConfig()
+	normalized, ok := config.NormalizeProviderName(providerName)
+	if !ok {
+		return nil, fmt.Errorf("unsupported provider %q", providerName)
+	}
+	draft, exists := cfg.ProviderByName(normalized)
+	if !exists {
+		return nil, fmt.Errorf("unsupported provider %q", providerName)
+	}
+	return s.UpdateProvider(ctx, normalized, draft, true, false)
 }
 
 func (s *MissionControlService) UpdateTelegram(ctx context.Context, telegram config.TelegramConfig) (map[string]any, error) {
-	_ = ctx
 	cfg := s.getConfig()
 	activeProvider := cfg.Providers.Active
 	activeCfg, _ := cfg.ProviderByName(activeProvider)
@@ -891,7 +1132,52 @@ func (s *MissionControlService) UpdateTelegram(ctx context.Context, telegram con
 	if err := s.saveConfig(next); err != nil {
 		return nil, err
 	}
-	return map[string]any{"ok": true, "restartRequired": true}, nil
+	runtimeApplied := false
+	runtimeError := ""
+	if s.runtime != nil {
+		if err := s.runtime.ApplyTelegram(ctx, telegram); err != nil {
+			runtimeError = err.Error()
+		} else {
+			runtimeApplied = true
+		}
+	}
+	out := map[string]any{
+		"ok":              true,
+		"runtimeApplied":  runtimeApplied,
+		"restartRequired": !runtimeApplied,
+	}
+	if runtimeError != "" {
+		out["runtimeError"] = runtimeError
+	}
+	return out, nil
+}
+
+func (s *MissionControlService) UpdateChannel(ctx context.Context, channelID string, telegramCfg *config.TelegramConfig, scaffoldCfg *config.GenericChannelConfig) (map[string]any, error) {
+	normalized := strings.TrimSpace(strings.ToLower(channelID))
+	switch normalized {
+	case "telegram":
+		if telegramCfg == nil {
+			return nil, fmt.Errorf("telegram payload is required")
+		}
+		return s.UpdateTelegram(ctx, *telegramCfg)
+	default:
+		if scaffoldCfg == nil {
+			return nil, fmt.Errorf("scaffold payload is required")
+		}
+		cfg := s.getConfig()
+		if cfg.Channels.Scaffolds == nil {
+			cfg.Channels.Scaffolds = map[string]config.GenericChannelConfig{}
+		}
+		id := strings.TrimSpace(channelID)
+		if id == "" {
+			return nil, fmt.Errorf("channel id is required")
+		}
+		cfg.Channels.Scaffolds[id] = *scaffoldCfg
+		if err := s.saveConfig(cfg); err != nil {
+			return nil, err
+		}
+		return map[string]any{"ok": true, "runtimeApplied": false, "restartRequired": false}, nil
+	}
 }
 
 func (s *MissionControlService) UpdateRuntime(ctx context.Context, heartbeatIntervalSec *int, mailboxSize *int) (map[string]any, error) {
@@ -913,15 +1199,23 @@ func (s *MissionControlService) UpdateRuntime(ctx context.Context, heartbeatInte
 		return nil, err
 	}
 	applied := false
+	runtimeError := ""
 	if heartbeatIntervalSec != nil && s.heartbeat != nil {
 		s.heartbeat.SetInterval(time.Duration(*heartbeatIntervalSec) * time.Second)
 		applied = true
 	}
-	return map[string]any{
+	out := map[string]any{
 		"ok":              true,
 		"runtimeApplied":  applied,
-		"restartRequired": heartbeatIntervalSec != nil && !applied,
-	}, nil
+		"restartRequired": mailboxSize != nil || (heartbeatIntervalSec != nil && !applied),
+	}
+	if heartbeatIntervalSec != nil && !applied {
+		runtimeError = "heartbeat runtime is offline"
+	}
+	if runtimeError != "" {
+		out["runtimeError"] = runtimeError
+	}
+	return out, nil
 }
 
 func (s *MissionControlService) UpdatePassword(ctx context.Context, currentPassword, nextPassword string, minLength int) (map[string]any, error) {
@@ -945,6 +1239,243 @@ func (s *MissionControlService) UpdatePassword(ctx context.Context, currentPassw
 		return nil, err
 	}
 	return map[string]any{"ok": true}, nil
+}
+
+func (s *MissionControlService) SnapshotExport(ctx context.Context) (map[string]any, error) {
+	settings := s.Settings()
+	board, err := s.Kanban(ctx)
+	if err != nil {
+		return nil, err
+	}
+	policy, err := s.TaskPolicy(ctx)
+	if err != nil {
+		return nil, err
+	}
+	usageDays, err := s.store.ListUsageDays(ctx)
+	if err != nil {
+		return nil, err
+	}
+	heartbeatRuns, err := s.store.ListHeartbeatRuns(ctx, 5000)
+	if err != nil {
+		return nil, err
+	}
+	logs, err := s.AnalyticsLogsFiltered(ctx, AnalyticsLogFilter{Limit: 1000})
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"version":       1,
+		"exportedAt":    time.Now().UTC().Format(time.RFC3339),
+		"settings":      settings,
+		"kanban":        map[string]any{"columns": board.Columns, "tasks": board.Tasks, "policy": policy},
+		"usageDays":     usageDays,
+		"heartbeatRuns": heartbeatRuns,
+		"logs":          logs,
+	}, nil
+}
+
+func (s *MissionControlService) SnapshotImport(ctx context.Context, payload map[string]any) (map[string]any, error) {
+	type importedSettings struct {
+		Providers struct {
+			Active string `json:"active"`
+			Items  []struct {
+				ID      string `json:"id"`
+				APIBase string `json:"apiBase"`
+				Model   string `json:"model"`
+			} `json:"items"`
+		} `json:"providers"`
+		Channels struct {
+			Telegram struct {
+				Enabled   bool     `json:"enabled"`
+				AllowFrom []string `json:"allowFrom"`
+			} `json:"telegram"`
+			Scaffolds map[string]config.GenericChannelConfig `json:"scaffolds"`
+		} `json:"channels"`
+		Runtime struct {
+			HeartbeatIntervalSec int `json:"heartbeatIntervalSec"`
+			MailboxSize          int `json:"mailboxSize"`
+		} `json:"runtime"`
+	}
+	type importedPayload struct {
+		Version  int              `json:"version"`
+		Settings importedSettings `json:"settings"`
+		Kanban   struct {
+			Columns []mission.Column             `json:"columns"`
+			Tasks   []mission.Task               `json:"tasks"`
+			Policy  mission.TaskAutomationPolicy `json:"policy"`
+		} `json:"kanban"`
+		UsageDays     []mission.UsageDay     `json:"usageDays"`
+		HeartbeatRuns []mission.HeartbeatRun `json:"heartbeatRuns"`
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	var in importedPayload
+	if err := json.Unmarshal(raw, &in); err != nil {
+		return nil, fmt.Errorf("invalid snapshot payload: %w", err)
+	}
+	if in.Version <= 0 {
+		return nil, fmt.Errorf("snapshot version is required")
+	}
+
+	cfg := s.getConfig()
+	updatedProviders := 0
+	for _, item := range in.Settings.Providers.Items {
+		id, ok := config.NormalizeProviderName(item.ID)
+		if !ok {
+			continue
+		}
+		currentProvider, exists := cfg.ProviderByName(id)
+		if !exists {
+			continue
+		}
+		currentProvider.APIBase = strings.TrimSpace(item.APIBase)
+		currentProvider.Model = strings.TrimSpace(item.Model)
+		_ = cfg.SetProviderByName(id, currentProvider)
+		updatedProviders++
+	}
+	if active, ok := config.NormalizeProviderName(in.Settings.Providers.Active); ok {
+		cfg.Providers.Active = active
+	}
+	if in.Settings.Runtime.HeartbeatIntervalSec > 0 {
+		cfg.Runtime.HeartbeatIntervalSec = in.Settings.Runtime.HeartbeatIntervalSec
+	}
+	if in.Settings.Runtime.MailboxSize > 0 {
+		cfg.Runtime.MailboxSize = in.Settings.Runtime.MailboxSize
+	}
+	// Preserve telegram token and only merge non-secret values.
+	cfg.Channels.Telegram.Enabled = in.Settings.Channels.Telegram.Enabled
+	cfg.Channels.Telegram.AllowFrom = in.Settings.Channels.Telegram.AllowFrom
+	if cfg.Channels.Scaffolds == nil {
+		cfg.Channels.Scaffolds = map[string]config.GenericChannelConfig{}
+	}
+	for id, scaffold := range in.Settings.Channels.Scaffolds {
+		existing := cfg.Channels.Scaffolds[id]
+		scaffold.AuthToken = existing.AuthToken
+		cfg.Channels.Scaffolds[id] = scaffold
+	}
+
+	if err := s.saveConfig(cfg); err != nil {
+		return nil, err
+	}
+
+	importedColumns := 0
+	if len(in.Kanban.Columns) > 0 {
+		if _, err := s.SetColumns(ctx, in.Kanban.Columns); err != nil {
+			return nil, err
+		}
+		importedColumns = len(in.Kanban.Columns)
+	}
+
+	importedTasks := 0
+	for _, task := range in.Kanban.Tasks {
+		if strings.TrimSpace(task.ID) == "" || strings.TrimSpace(task.Title) == "" {
+			continue
+		}
+		if task.CreatedAt.IsZero() {
+			task.CreatedAt = time.Now().UTC()
+		}
+		if task.UpdatedAt.IsZero() {
+			task.UpdatedAt = task.CreatedAt
+		}
+		if task.Version <= 0 {
+			task.Version = 1
+		}
+		if err := s.store.PutMissionTask(ctx, task); err != nil {
+			return nil, err
+		}
+		importedTasks++
+	}
+
+	importedUsageDays := 0
+	for _, usage := range in.UsageDays {
+		if strings.TrimSpace(usage.Day) == "" {
+			continue
+		}
+		if err := s.store.PutUsageDay(ctx, usage); err != nil {
+			return nil, err
+		}
+		importedUsageDays++
+	}
+
+	importedHeartbeatRuns := 0
+	for _, run := range in.HeartbeatRuns {
+		if strings.TrimSpace(run.ID) == "" {
+			run.ID = "hb-import-" + fmt.Sprintf("%d", time.Now().UTC().UnixNano())
+		}
+		if run.StartedAt.IsZero() {
+			run.StartedAt = time.Now().UTC()
+		}
+		if run.FinishedAt.IsZero() {
+			run.FinishedAt = run.StartedAt
+		}
+		if err := s.store.RecordHeartbeatRun(ctx, run); err != nil {
+			return nil, err
+		}
+		importedHeartbeatRuns++
+	}
+
+	importedPolicy := false
+	if in.Kanban.Policy.DedupeWindowSec > 0 || strings.TrimSpace(in.Kanban.Policy.DefaultColumnID) != "" {
+		if _, err := s.SetTaskPolicy(ctx, in.Kanban.Policy); err != nil {
+			return nil, err
+		}
+		importedPolicy = true
+	}
+
+	runtimeApplied := false
+	runtimeWarnings := []string{}
+	activeProvider, activeCfg := cfg.PrimaryProvider()
+	if s.runtime != nil && strings.TrimSpace(activeProvider) != "" {
+		if err := s.runtime.ApplyProvider(ctx, activeProvider, activeCfg); err != nil {
+			runtimeWarnings = append(runtimeWarnings, "provider apply: "+err.Error())
+		} else {
+			runtimeApplied = true
+		}
+		if err := s.runtime.ApplyTelegram(ctx, cfg.Channels.Telegram); err != nil {
+			runtimeWarnings = append(runtimeWarnings, "telegram apply: "+err.Error())
+		}
+	}
+	if s.heartbeat != nil && cfg.Runtime.HeartbeatIntervalSec > 0 {
+		s.heartbeat.SetInterval(time.Duration(cfg.Runtime.HeartbeatIntervalSec) * time.Second)
+		runtimeApplied = true
+	}
+
+	return map[string]any{
+		"ok":                    true,
+		"version":               in.Version,
+		"runtimeApplied":        runtimeApplied,
+		"updatedProviders":      updatedProviders,
+		"importedColumns":       importedColumns,
+		"importedTasks":         importedTasks,
+		"importedPolicy":        importedPolicy,
+		"importedUsageDays":     importedUsageDays,
+		"importedHeartbeatRuns": importedHeartbeatRuns,
+		"warnings":              runtimeWarnings,
+	}, nil
+}
+
+func includeAnalyticsRecord(record map[string]any, filterType string, from, to *time.Time) bool {
+	rowType := strings.TrimSpace(strings.ToLower(fmt.Sprint(record["type"])))
+	if filterType != "" && rowType != filterType {
+		return false
+	}
+	created := parseAnalyticsTime(fmt.Sprint(record["createdAt"]))
+	if from != nil && created.Before(*from) {
+		return false
+	}
+	if to != nil && created.After(*to) {
+		return false
+	}
+	return true
+}
+
+func parseAnalyticsTime(value string) time.Time {
+	if parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(value)); err == nil {
+		return parsed.UTC()
+	}
+	return time.Time{}
 }
 
 func (s *MissionControlService) ensureColumns(ctx context.Context) ([]mission.Column, error) {

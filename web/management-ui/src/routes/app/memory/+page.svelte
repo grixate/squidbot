@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { Button } from 'bits-ui';
+  import { UIButton, UISelect } from '$lib/components/ui';
   import { fetchJSON, parseError } from '$lib/http';
 
   type FileDescriptor = { id: string; label: string; path: string };
@@ -23,10 +23,13 @@
 
   let query = '';
   let searchResults: SearchResult[] = [];
+  let fileOptions: Array<{ value: string; label: string }> = [];
+  let lastSelectedFileID = '';
 
   async function loadFiles() {
     const response = await fetchJSON<{ files: FileDescriptor[] }>('/api/manage/files');
     files = response.files || [];
+    fileOptions = files.map((file) => ({ value: file.id, label: file.label }));
     if (!selectedFileID && files.length > 0) {
       selectedFileID = files[0].id;
       await loadSelectedFile();
@@ -38,6 +41,11 @@
     const file = await fetchJSON<{ content: string; etag: string }>(`/api/manage/files?id=${selectedFileID}`);
     fileContent = file.content || '';
     etag = file.etag || '';
+  }
+
+  $: if (selectedFileID && selectedFileID !== lastSelectedFileID) {
+    lastSelectedFileID = selectedFileID;
+    loadSelectedFile();
   }
 
   async function saveFile() {
@@ -91,7 +99,7 @@
   </header>
 
   {#if loading}
-    <p class="muted">Loading...</p>
+    <p class="muted">Loading…</p>
   {:else}
     <div class="split-grid">
       <section class="panel">
@@ -103,9 +111,9 @@
           bind:value={query}
           type="text"
           autocomplete="off"
-          placeholder="Search memory snippets..."
+          placeholder="Search memory snippets…"
         />
-        <Button.Root type="button" onclick={searchMemory}>Search</Button.Root>
+        <UIButton type="button" onclick={searchMemory}>Search</UIButton>
         {#if searchResults.length === 0}
           <p class="muted">No results yet.</p>
         {:else}
@@ -123,23 +131,19 @@
       <section class="panel">
         <h3>Curated Editor</h3>
         <label for="file-select">File</label>
-        <select
+        <UISelect
           id="file-select"
           name="memory_file"
           bind:value={selectedFileID}
-          onchange={async () => {
-            await loadSelectedFile();
-          }}
-        >
-          {#each files as file}
-            <option value={file.id}>{file.label}</option>
-          {/each}
-        </select>
+          options={fileOptions}
+          ariaLabel="Memory file"
+          placeholder="Select file…"
+        />
         <label for="file-content">Content</label>
         <textarea id="file-content" name="memory_content" bind:value={fileContent} rows={18}></textarea>
         <div class="inline">
-          <Button.Root type="button" onclick={saveFile}>Save</Button.Root>
-          <Button.Root type="button" onclick={loadSelectedFile}>Reload</Button.Root>
+          <UIButton type="button" onclick={saveFile}>Save</UIButton>
+          <UIButton type="button" onclick={loadSelectedFile}>Reload</UIButton>
         </div>
       </section>
     </div>

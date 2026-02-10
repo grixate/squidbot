@@ -7,4 +7,4 @@
   });
 </script>
 
-<p class="muted">Redirecting...</p>
+<p class="muted">Redirecting…</p>

@@ -140,6 +140,148 @@ hr {
   padding: 16px;
 }
 
+.ui-button {
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--line));
+  border-radius: 10px;
+  background: linear-gradient(180deg, #1a2a3f 0%, #152235 100%);
+  color: var(--ink);
+  padding: 10px 14px;
+  cursor: pointer;
+  transition: background-color 0.12s ease, border-color 0.12s ease, transform 0.08s ease;
+}
+
+.ui-button:hover {
+  border-color: color-mix(in srgb, var(--accent) 65%, var(--line));
+  background: linear-gradient(180deg, #213755 0%, #1a2d45 100%);
+}
+
+.ui-button:active {
+  transform: translateY(1px);
+}
+
+.ui-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.ui-button-subtle {
+  border-color: var(--line);
+  background: #12192a;
+}
+
+.ui-button-danger {
+  border-color: color-mix(in srgb, var(--danger) 55%, var(--line));
+  background: linear-gradient(180deg, #412230 0%, #341b27 100%);
+}
+
+.ui-select-trigger {
+  width: 100%;
+  min-height: 42px;
+  margin-top: 6px;
+  margin-bottom: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #0f1524;
+  color: var(--ink);
+  padding: 10px 12px;
+  text-align: left;
+}
+
+.ui-select-content {
+  z-index: 40;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #101827;
+  padding: 6px;
+}
+
+.ui-select-item {
+  border-radius: 8px;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+
+.ui-select-item:hover,
+.ui-select-item[data-highlighted] {
+  background: #1a2a41;
+}
+
+.ui-select-item[data-disabled] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.ui-dialog-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(5, 8, 14, 0.72);
+  z-index: 80;
+}
+
+.ui-dialog-content {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  width: min(420px, calc(100vw - 24px));
+  transform: translate(-50%, -50%);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: linear-gradient(180deg, var(--panel) 0%, #12192a 100%);
+  padding: 16px;
+  z-index: 90;
+}
+
+.ui-switch-root {
+  width: 46px;
+  height: 28px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: #0e1524;
+  padding: 2px;
+  display: inline-flex;
+  align-items: center;
+}
+
+.ui-switch-thumb {
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: #7283a1;
+  transition: transform 0.12s ease;
+}
+
+.ui-switch-root[data-state='checked'] {
+  background: color-mix(in srgb, var(--accent) 34%, #101827);
+  border-color: color-mix(in srgb, var(--accent) 54%, var(--line));
+}
+
+.ui-switch-root[data-state='checked'] .ui-switch-thumb {
+  background: var(--accent);
+  transform: translateX(18px);
+}
+
+.ui-scroll-area {
+  width: 100%;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.ui-scroll-viewport {
+  width: 100%;
+  height: 100%;
+}
+
+.ui-scrollbar {
+  background: #12192a;
+  width: 10px;
+}
+
+.ui-scroll-thumb {
+  background: #2a3a58;
+  border-radius: 999px;
+}
+
 .page-header {
   margin-bottom: 16px;
 }
@@ -332,6 +474,10 @@ hr {
   overflow-x: auto;
 }
 
+.logs-scroll {
+  max-height: 420px;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
@@ -352,9 +498,55 @@ td {
   gap: 6px 12px;
 }
 
+.tabs-list {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.tab-trigger {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #101827;
+  color: var(--muted);
+  padding: 8px 12px;
+}
+
+.tab-trigger[data-state='active'] {
+  border-color: color-mix(in srgb, var(--accent) 60%, var(--line));
+  color: var(--ink);
+  background: #192942;
+}
+
+.analytics-controls {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.analytics-stats {
+  margin-bottom: 12px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.analytics-filter-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.analytics-filter-actions {
+  margin-bottom: 10px;
+}
+
 @media (max-width: 1040px) {
   .stat-grid,
   .kanban {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .analytics-filter-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
