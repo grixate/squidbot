@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/grixate/squidbot/internal/catalog"
 )
 
 type Config struct {
@@ -38,13 +41,14 @@ type AgentDefaults struct {
 }
 
 type ProvidersConfig struct {
-	Active     string         `json:"active"`
-	OpenRouter ProviderConfig `json:"openrouter"`
-	Anthropic  ProviderConfig `json:"anthropic"`
-	OpenAI     ProviderConfig `json:"openai"`
-	Gemini     ProviderConfig `json:"gemini"`
-	Ollama     ProviderConfig `json:"ollama"`
-	LMStudio   ProviderConfig `json:"lmstudio"`
+	Active     string                    `json:"active"`
+	Registry   map[string]ProviderConfig `json:"registry,omitempty"`
+	OpenRouter ProviderConfig            `json:"openrouter"`
+	Anthropic  ProviderConfig            `json:"anthropic"`
+	OpenAI     ProviderConfig            `json:"openai"`
+	Gemini     ProviderConfig            `json:"gemini"`
+	Ollama     ProviderConfig            `json:"ollama"`
+	LMStudio   ProviderConfig            `json:"lmstudio"`
 }
 
 type ProviderConfig struct {
@@ -55,6 +59,8 @@ type ProviderConfig struct {
 
 type ChannelsConfig struct {
 	Telegram  TelegramConfig                  `json:"telegram"`
+	Registry  map[string]GenericChannelConfig `json:"registry,omitempty"`
+	Plugins   map[string]PluginChannelConfig  `json:"plugins,omitempty"`
 	Scaffolds map[string]GenericChannelConfig `json:"scaffolds,omitempty"`
 }
 
@@ -67,6 +73,16 @@ type TelegramConfig struct {
 type GenericChannelConfig struct {
 	Label     string            `json:"label,omitempty"`
 	Kind      string            `json:"kind,omitempty"`
+	Enabled   bool              `json:"enabled"`
+	Token     string            `json:"token,omitempty"`
+	AllowFrom []string          `json:"allowFrom,omitempty"`
+	Endpoint  string            `json:"endpoint,omitempty"`
+	AuthToken string            `json:"authToken,omitempty"`
+	Headers   map[string]string `json:"headers,omitempty"`
+	Metadata  map[string]string `json:"metadata,omitempty"`
+}
+
+type PluginChannelConfig struct {
 	Enabled   bool              `json:"enabled"`
 	Endpoint  string            `json:"endpoint,omitempty"`
 	AuthToken string            `json:"authToken,omitempty"`
@@ -143,6 +159,35 @@ var supportedProviders = []string{
 	ProviderLMStudio,
 }
 
+func init() {
+	seen := map[string]struct{}{}
+	merged := make([]string, 0, len(supportedProviders)+len(catalog.OpenClawProviders))
+	for _, id := range supportedProviders {
+		id = strings.TrimSpace(strings.ToLower(id))
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		merged = append(merged, id)
+	}
+	for _, profile := range catalog.OpenClawProviders {
+		id := strings.TrimSpace(strings.ToLower(profile.ID))
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		merged = append(merged, id)
+	}
+	sort.Strings(merged)
+	supportedProviders = merged
+}
+
 func (d DurationValue) MarshalJSON() ([]byte, error) {
 	return json.Marshal(d.String())
 }
@@ -188,6 +233,8 @@ func Default() Config {
 				Enabled:   false,
 				AllowFrom: []string{},
 			},
+			Registry:  map[string]GenericChannelConfig{},
+			Plugins:   map[string]PluginChannelConfig{},
 			Scaffolds: map[string]GenericChannelConfig{},
 		},
 		Tools: ToolsConfig{
@@ -275,6 +322,8 @@ func Load(path string) (Config, error) {
 	if err := json.Unmarshal(bytes, &cfg); err != nil {
 		return cfg, err
 	}
+	migrateLegacyProviders(&cfg)
+	migrateLegacyChannels(&cfg)
 	applyEnvOverrides(&cfg)
 	return cfg, nil
 }
@@ -295,6 +344,15 @@ func Save(path string, cfg Config) error {
 }
 
 func applyEnvOverrides(cfg *Config) {
+	if cfg.Providers.Registry == nil {
+		cfg.Providers.Registry = map[string]ProviderConfig{}
+	}
+	if cfg.Channels.Registry == nil {
+		cfg.Channels.Registry = map[string]GenericChannelConfig{}
+	}
+	if cfg.Channels.Plugins == nil {
+		cfg.Channels.Plugins = map[string]PluginChannelConfig{}
+	}
 	env := map[string]*string{
 		"SQUIDBOT_PROVIDER_ACTIVE":            &cfg.Providers.Active,
 		"SQUIDBOT_OPENROUTER_API_KEY":         &cfg.Providers.OpenRouter.APIKey,
@@ -363,6 +421,10 @@ func applyEnvOverrides(cfg *Config) {
 			cfg.Skills.Paths = out
 		}
 	}
+	applyDynamicProviderEnvOverrides(cfg)
+	applyDynamicChannelEnvOverrides(cfg)
+	migrateLegacyProviders(cfg)
+	migrateLegacyChannels(cfg)
 }
 
 func (c Config) PrimaryProvider() (name string, provider ProviderConfig) {
@@ -375,6 +437,13 @@ func (c Config) PrimaryProvider() (name string, provider ProviderConfig) {
 }
 
 func (c Config) legacyPrimaryProvider() (name string, provider ProviderConfig) {
+	for _, providerID := range SupportedProviders() {
+		if p, ok := c.Providers.Registry[providerID]; ok {
+			if hasProviderCredentials(providerID, p) {
+				return providerID, p
+			}
+		}
+	}
 	if strings.TrimSpace(c.Providers.OpenRouter.APIKey) != "" {
 		return ProviderOpenRouter, c.Providers.OpenRouter
 	}
@@ -396,20 +465,42 @@ func SupportedProviders() []string {
 	return out
 }
 
+func SupportedChannels() []string {
+	out := make([]string, 0, len(catalog.OpenClawChannels))
+	for _, item := range catalog.OpenClawChannels {
+		out = append(out, item.ID)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func ChannelProfile(name string) (catalog.ChannelProfile, bool) {
+	return catalog.ChannelByID(strings.ToLower(strings.TrimSpace(name)))
+}
+
 func NormalizeProviderName(name string) (string, bool) {
 	trimmed := strings.ToLower(strings.TrimSpace(name))
-	switch trimmed {
-	case ProviderOpenRouter, ProviderAnthropic, ProviderOpenAI, ProviderGemini, ProviderOllama, ProviderLMStudio:
-		return trimmed, true
-	default:
+	if trimmed == "" {
 		return "", false
 	}
+	for _, item := range supportedProviders {
+		if trimmed == item {
+			return trimmed, true
+		}
+	}
+	if strings.HasPrefix(trimmed, "custom-") || strings.HasPrefix(trimmed, "custom:") {
+		return trimmed, true
+	}
+	return "", false
 }
 
 func (c Config) ProviderByName(name string) (ProviderConfig, bool) {
 	normalized, ok := NormalizeProviderName(name)
 	if !ok {
 		return ProviderConfig{}, false
+	}
+	if p, exists := c.Providers.Registry[normalized]; exists {
+		return p, true
 	}
 	switch normalized {
 	case ProviderOpenRouter:
@@ -434,6 +525,10 @@ func (c *Config) SetProviderByName(name string, provider ProviderConfig) bool {
 	if !ok {
 		return false
 	}
+	if c.Providers.Registry == nil {
+		c.Providers.Registry = map[string]ProviderConfig{}
+	}
+	c.Providers.Registry[normalized] = provider
 	switch normalized {
 	case ProviderOpenRouter:
 		c.Providers.OpenRouter = provider
@@ -448,39 +543,31 @@ func (c *Config) SetProviderByName(name string, provider ProviderConfig) bool {
 	case ProviderLMStudio:
 		c.Providers.LMStudio = provider
 	default:
-		return false
+		return true
 	}
 	return true
 }
 
 func ProviderDefaultAPIBase(name string) string {
-	switch name {
-	case ProviderOpenRouter:
-		return "https://openrouter.ai/api/v1"
-	case ProviderOpenAI:
-		return "https://api.openai.com/v1"
-	case ProviderGemini:
-		return "https://generativelanguage.googleapis.com/v1beta/openai"
-	case ProviderOllama:
-		return "http://localhost:11434/v1"
-	case ProviderLMStudio:
-		return "http://localhost:1234/v1"
-	default:
+	normalized, ok := NormalizeProviderName(name)
+	if !ok {
 		return ""
 	}
+	if profile, exists := catalog.ProviderByID(normalized); exists {
+		return strings.TrimSpace(profile.DefaultAPIBase)
+	}
+	return ""
 }
 
 func ProviderDefaultModel(name string) string {
-	switch name {
-	case ProviderGemini:
-		return "gemini-3.0-pro"
-	case ProviderOllama:
-		return "llama3.1:8b"
-	case ProviderLMStudio:
-		return "local-model"
-	default:
+	normalized, ok := NormalizeProviderName(name)
+	if !ok {
 		return ""
 	}
+	if profile, exists := catalog.ProviderByID(normalized); exists {
+		return strings.TrimSpace(profile.DefaultModel)
+	}
+	return ""
 }
 
 func ValidateActiveProvider(cfg Config) error {
@@ -518,26 +605,203 @@ func ProviderRequirements(name string) (requiresAPIKey, requiresModel bool, ok b
 	if !ok {
 		return false, false, false
 	}
-	switch normalized {
-	case ProviderOpenRouter, ProviderAnthropic, ProviderOpenAI, ProviderGemini:
-		return true, false, true
-	case ProviderOllama, ProviderLMStudio:
-		return false, true, true
-	default:
-		return false, false, false
+	if profile, exists := catalog.ProviderByID(normalized); exists {
+		return profile.RequiresAPIKey, profile.RequiresModel, true
 	}
+	if strings.HasPrefix(normalized, "custom-") || strings.HasPrefix(normalized, "custom:") {
+		return false, false, true
+	}
+	return false, false, false
 }
 
 func validateProviderConfig(name string, provider ProviderConfig) error {
-	switch name {
-	case ProviderOpenRouter, ProviderAnthropic, ProviderOpenAI, ProviderGemini:
-		if strings.TrimSpace(provider.APIKey) == "" {
-			return fmt.Errorf("provider %q requires apiKey", name)
-		}
-	case ProviderOllama, ProviderLMStudio:
-		if strings.TrimSpace(provider.Model) == "" {
-			return fmt.Errorf("provider %q requires model", name)
-		}
+	requiresAPIKey, requiresModel, ok := ProviderRequirements(name)
+	if !ok {
+		return fmt.Errorf("unsupported provider %q", name)
+	}
+	if requiresAPIKey && strings.TrimSpace(provider.APIKey) == "" {
+		return fmt.Errorf("provider %q requires apiKey", name)
+	}
+	if requiresModel && strings.TrimSpace(provider.Model) == "" {
+		return fmt.Errorf("provider %q requires model", name)
 	}
 	return nil
+}
+
+func hasProviderCredentials(providerID string, provider ProviderConfig) bool {
+	requiresAPIKey, requiresModel, ok := ProviderRequirements(providerID)
+	if !ok {
+		return false
+	}
+	if requiresAPIKey {
+		return strings.TrimSpace(provider.APIKey) != ""
+	}
+	if requiresModel {
+		return strings.TrimSpace(provider.Model) != ""
+	}
+	return strings.TrimSpace(provider.APIKey) != "" || strings.TrimSpace(provider.Model) != "" || strings.TrimSpace(provider.APIBase) != ""
+}
+
+func migrateLegacyProviders(cfg *Config) {
+	if cfg.Providers.Registry == nil {
+		cfg.Providers.Registry = map[string]ProviderConfig{}
+	}
+	if _, ok := cfg.Providers.Registry[ProviderOpenRouter]; !ok && !isEmptyProvider(cfg.Providers.OpenRouter) {
+		cfg.Providers.Registry[ProviderOpenRouter] = cfg.Providers.OpenRouter
+	}
+	if _, ok := cfg.Providers.Registry[ProviderAnthropic]; !ok && !isEmptyProvider(cfg.Providers.Anthropic) {
+		cfg.Providers.Registry[ProviderAnthropic] = cfg.Providers.Anthropic
+	}
+	if _, ok := cfg.Providers.Registry[ProviderOpenAI]; !ok && !isEmptyProvider(cfg.Providers.OpenAI) {
+		cfg.Providers.Registry[ProviderOpenAI] = cfg.Providers.OpenAI
+	}
+	if _, ok := cfg.Providers.Registry[ProviderGemini]; !ok && !isEmptyProvider(cfg.Providers.Gemini) {
+		cfg.Providers.Registry[ProviderGemini] = cfg.Providers.Gemini
+	}
+	if _, ok := cfg.Providers.Registry[ProviderOllama]; !ok && !isEmptyProvider(cfg.Providers.Ollama) {
+		cfg.Providers.Registry[ProviderOllama] = cfg.Providers.Ollama
+	}
+	if _, ok := cfg.Providers.Registry[ProviderLMStudio]; !ok && !isEmptyProvider(cfg.Providers.LMStudio) {
+		cfg.Providers.Registry[ProviderLMStudio] = cfg.Providers.LMStudio
+	}
+}
+
+func migrateLegacyChannels(cfg *Config) {
+	if cfg.Channels.Registry == nil {
+		cfg.Channels.Registry = map[string]GenericChannelConfig{}
+	}
+	if cfg.Channels.Plugins == nil {
+		cfg.Channels.Plugins = map[string]PluginChannelConfig{}
+	}
+	legacy := GenericChannelConfig{
+		Label:     "Telegram",
+		Kind:      "core",
+		Enabled:   cfg.Channels.Telegram.Enabled,
+		Token:     strings.TrimSpace(cfg.Channels.Telegram.Token),
+		AllowFrom: normalizeAllowFrom(cfg.Channels.Telegram.AllowFrom),
+	}
+	current := cfg.Channels.Registry["telegram"]
+	if strings.TrimSpace(current.Token) == "" && strings.TrimSpace(legacy.Token) != "" {
+		current.Token = legacy.Token
+	}
+	if len(current.AllowFrom) == 0 && len(legacy.AllowFrom) > 0 {
+		current.AllowFrom = legacy.AllowFrom
+	}
+	current.Label = defaultString(current.Label, legacy.Label)
+	current.Kind = defaultString(current.Kind, legacy.Kind)
+	current.Enabled = current.Enabled || legacy.Enabled
+	cfg.Channels.Registry["telegram"] = current
+
+	telegram := cfg.Channels.Registry["telegram"]
+	cfg.Channels.Telegram = TelegramConfig{
+		Enabled:   telegram.Enabled,
+		Token:     strings.TrimSpace(telegram.Token),
+		AllowFrom: normalizeAllowFrom(telegram.AllowFrom),
+	}
+}
+
+func applyDynamicProviderEnvOverrides(cfg *Config) {
+	const prefix = "SQUIDBOT_PROVIDER_"
+	for _, envEntry := range os.Environ() {
+		parts := strings.SplitN(envEntry, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := parts[0]
+		value := strings.TrimSpace(parts[1])
+		if value == "" || !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		rest := strings.TrimPrefix(key, prefix)
+		field := ""
+		switch {
+		case strings.HasSuffix(rest, "_API_KEY"):
+			field = "api_key"
+			rest = strings.TrimSuffix(rest, "_API_KEY")
+		case strings.HasSuffix(rest, "_API_BASE"):
+			field = "api_base"
+			rest = strings.TrimSuffix(rest, "_API_BASE")
+		case strings.HasSuffix(rest, "_MODEL"):
+			field = "model"
+			rest = strings.TrimSuffix(rest, "_MODEL")
+		default:
+			continue
+		}
+		providerID := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(rest), "_", "-"))
+		if providerID == "" {
+			continue
+		}
+		if cfg.Providers.Registry == nil {
+			cfg.Providers.Registry = map[string]ProviderConfig{}
+		}
+		current := cfg.Providers.Registry[providerID]
+		switch field {
+		case "api_key":
+			current.APIKey = value
+		case "api_base":
+			current.APIBase = value
+		case "model":
+			current.Model = value
+		}
+		cfg.Providers.Registry[providerID] = current
+	}
+}
+
+func applyDynamicChannelEnvOverrides(cfg *Config) {
+	const prefix = "SQUIDBOT_CHANNEL_"
+	for _, envEntry := range os.Environ() {
+		parts := strings.SplitN(envEntry, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := parts[0]
+		value := strings.TrimSpace(parts[1])
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		rest := strings.TrimPrefix(key, prefix)
+		field := ""
+		switch {
+		case strings.HasSuffix(rest, "_ENABLED"):
+			field = "enabled"
+			rest = strings.TrimSuffix(rest, "_ENABLED")
+		case strings.HasSuffix(rest, "_TOKEN"):
+			field = "token"
+			rest = strings.TrimSuffix(rest, "_TOKEN")
+		case strings.HasSuffix(rest, "_ENDPOINT"):
+			field = "endpoint"
+			rest = strings.TrimSuffix(rest, "_ENDPOINT")
+		case strings.HasSuffix(rest, "_AUTH_TOKEN"):
+			field = "auth_token"
+			rest = strings.TrimSuffix(rest, "_AUTH_TOKEN")
+		default:
+			continue
+		}
+		channelID := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(rest), "_", "-"))
+		if channelID == "" {
+			continue
+		}
+		if cfg.Channels.Registry == nil {
+			cfg.Channels.Registry = map[string]GenericChannelConfig{}
+		}
+		current := cfg.Channels.Registry[channelID]
+		switch field {
+		case "enabled":
+			enabled, err := strconv.ParseBool(value)
+			if err == nil {
+				current.Enabled = enabled
+			}
+		case "token":
+			current.Token = value
+		case "endpoint":
+			current.Endpoint = value
+		case "auth_token":
+			current.AuthToken = value
+		}
+		cfg.Channels.Registry[channelID] = current
+	}
+}
+
+func isEmptyProvider(provider ProviderConfig) bool {
+	return strings.TrimSpace(provider.APIKey) == "" && strings.TrimSpace(provider.APIBase) == "" && strings.TrimSpace(provider.Model) == ""
 }

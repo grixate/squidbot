@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/grixate/squidbot/internal/agent"
+	channelreg "github.com/grixate/squidbot/internal/channels"
 	"github.com/grixate/squidbot/internal/channels/telegram"
 	"github.com/grixate/squidbot/internal/config"
 	"github.com/grixate/squidbot/internal/cron"
@@ -23,7 +24,7 @@ type Runtime struct {
 	Engine    *agent.Engine
 	Cron      *cron.Service
 	Heartbeat *heartbeat.Service
-	Telegram  *telegram.Channel
+	Channels  *channelreg.Registry
 	Metrics   *telemetry.Metrics
 	log       *log.Logger
 	cancel    context.CancelFunc
@@ -105,9 +106,8 @@ func BuildRuntime(cfg config.Config, logger *log.Logger) (*Runtime, error) {
 		}
 	})
 
-	if cfg.Channels.Telegram.Enabled {
-		runtime.Telegram = telegram.New(cfg.Channels.Telegram, runtime.telegramIngress(), logger)
-	}
+	runtime.Channels = channelreg.NewRegistry(logger)
+	runtime.registerChannels(cfg)
 
 	return runtime, nil
 }
@@ -133,22 +133,17 @@ func (r *Runtime) StartGateway(ctx context.Context) error {
 			case <-ctx.Done():
 				return
 			case msg := <-r.Engine.Outbound():
-				if msg.Channel == "telegram" && r.Telegram != nil {
-					if err := r.Telegram.Send(ctx, msg); err != nil {
-						r.log.Printf("telegram send failed: %v", err)
+				if r.Channels != nil {
+					if err := r.Channels.Send(ctx, msg); err != nil {
+						r.log.Printf("channel send failed channel=%s: %v", msg.Channel, err)
 					}
 				}
 			}
 		}
 	}()
 
-	if r.Telegram != nil {
-		go func() {
-			if err := r.Telegram.Start(ctx); err != nil {
-				r.log.Printf("telegram channel stopped: %v", err)
-				cancel()
-			}
-		}()
+	if r.Channels != nil {
+		r.Channels.StartAll(ctx)
 	}
 
 	<-ctx.Done()
@@ -166,4 +161,70 @@ func (r *Runtime) Shutdown() error {
 		r.log.Printf("engine close error: %v", err)
 	}
 	return r.Store.Close()
+}
+
+func (r *Runtime) registerChannels(cfg config.Config) {
+	if r.Channels == nil {
+		return
+	}
+	if cfg.Channels.Registry == nil {
+		cfg.Channels.Registry = map[string]config.GenericChannelConfig{}
+	}
+	hasTelegram := false
+	for channelID, channelCfg := range cfg.Channels.Registry {
+		if !channelCfg.Enabled {
+			continue
+		}
+		switch channelID {
+		case "telegram":
+			hasTelegram = true
+			telegramCfg := config.TelegramConfig{
+				Enabled:   channelCfg.Enabled,
+				Token:     strings.TrimSpace(channelCfg.Token),
+				AllowFrom: channelCfg.AllowFrom,
+			}
+			if strings.TrimSpace(telegramCfg.Token) == "" {
+				telegramCfg = cfg.Channels.Telegram
+			}
+			adapter := &telegramAdapter{id: "telegram", channel: telegram.New(telegramCfg, r.telegramIngress(), r.log)}
+			if err := r.Channels.Register(adapter); err != nil {
+				r.log.Printf("register telegram channel failed: %v", err)
+			}
+		case "discord", "slack", "irc", "webchat":
+			if strings.TrimSpace(channelCfg.Endpoint) != "" {
+				_ = r.Channels.Register(channelreg.NewWebhookAdapter(channelID, channelCfg, r.log))
+			} else {
+				_ = r.Channels.Register(channelreg.NewNoopAdapter(channelID, r.log))
+			}
+		default:
+			_ = r.Channels.Register(channelreg.NewWebhookAdapter(channelID, channelCfg, r.log))
+		}
+	}
+	if !hasTelegram && cfg.Channels.Telegram.Enabled {
+		adapter := &telegramAdapter{id: "telegram", channel: telegram.New(cfg.Channels.Telegram, r.telegramIngress(), r.log)}
+		if err := r.Channels.Register(adapter); err != nil {
+			r.log.Printf("register telegram channel failed: %v", err)
+		}
+	}
+}
+
+type telegramAdapter struct {
+	id      string
+	channel *telegram.Channel
+}
+
+func (a *telegramAdapter) ID() string { return a.id }
+
+func (a *telegramAdapter) Start(ctx context.Context) error {
+	if a.channel == nil {
+		return nil
+	}
+	return a.channel.Start(ctx)
+}
+
+func (a *telegramAdapter) Send(ctx context.Context, msg agent.OutboundMessage) error {
+	if a.channel == nil {
+		return nil
+	}
+	return a.channel.Send(ctx, msg)
 }
