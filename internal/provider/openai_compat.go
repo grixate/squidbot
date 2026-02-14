@@ -44,15 +44,33 @@ func NewOpenAICompatProviderWithOptions(apiKey, baseURL, apiKeyHeader, apiKeyPre
 }
 
 func (p *OpenAICompatProvider) Capabilities() ProviderCapabilities {
-	return ProviderCapabilities{SupportsTools: true, SupportsStream: false, SupportsJSONOut: true}
+	return ProviderCapabilities{SupportsTools: true, SupportsStream: true, SupportsJSONOut: true}
 }
 
-func (p *OpenAICompatProvider) Stream(_ context.Context, _ ChatRequest) (<-chan StreamEvent, <-chan error) {
-	events := make(chan StreamEvent)
+func (p *OpenAICompatProvider) Stream(ctx context.Context, req ChatRequest) (<-chan StreamEvent, <-chan error) {
+	return p.streamFallback(ctx, req)
+}
+
+func (p *OpenAICompatProvider) streamFallback(ctx context.Context, req ChatRequest) (<-chan StreamEvent, <-chan error) {
+	events := make(chan StreamEvent, 8)
 	errs := make(chan error, 1)
-	close(events)
-	errs <- fmt.Errorf("streaming not implemented")
-	close(errs)
+	go func() {
+		defer close(events)
+		defer close(errs)
+		resp, err := p.Chat(ctx, req)
+		if err != nil {
+			errs <- err
+			return
+		}
+		if resp.Content != "" {
+			events <- StreamEvent{DeltaContent: resp.Content}
+		}
+		for _, call := range resp.ToolCalls {
+			toolCall := call
+			events <- StreamEvent{ToolCall: &toolCall}
+		}
+		events <- StreamEvent{Done: true}
+	}()
 	return events, errs
 }
 

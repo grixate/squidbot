@@ -31,6 +31,35 @@ type OutboundMessage struct {
 	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
+type StreamEvent struct {
+	Type       string         `json:"type"`
+	Delta      string         `json:"delta,omitempty"`
+	Content    string         `json:"content,omitempty"`
+	ToolName   string         `json:"tool_name,omitempty"`
+	ToolCallID string         `json:"tool_call_id,omitempty"`
+	Error      string         `json:"error,omitempty"`
+	Done       bool           `json:"done,omitempty"`
+	Metadata   map[string]any `json:"metadata,omitempty"`
+}
+
+type StreamSink interface {
+	OnEvent(ctx context.Context, event StreamEvent) error
+}
+
+type StreamSinkFunc func(ctx context.Context, event StreamEvent) error
+
+func (f StreamSinkFunc) OnEvent(ctx context.Context, event StreamEvent) error {
+	return f(ctx, event)
+}
+
+type OutboundStream struct {
+	Channel  string         `json:"channel"`
+	ChatID   string         `json:"chat_id"`
+	ReplyTo  string         `json:"reply_to,omitempty"`
+	Events   []StreamEvent  `json:"events"`
+	Metadata map[string]any `json:"metadata,omitempty"`
+}
+
 type Ack struct {
 	RequestID string `json:"request_id"`
 }
@@ -59,13 +88,14 @@ type Turn struct {
 }
 
 type ToolEvent struct {
-	ID        string    `json:"id"`
-	SessionID string    `json:"session_id"`
-	ToolName  string    `json:"tool_name"`
-	Input     string    `json:"input"`
-	Output    string    `json:"output"`
-	CreatedAt time.Time `json:"created_at"`
-	Version   int       `json:"version"`
+	ID        string          `json:"id"`
+	SessionID string          `json:"session_id"`
+	ToolName  string          `json:"tool_name"`
+	Input     string          `json:"input"`
+	Output    string          `json:"output"`
+	Metadata  json.RawMessage `json:"metadata,omitempty"`
+	CreatedAt time.Time       `json:"created_at"`
+	Version   int             `json:"version"`
 }
 
 type ConversationStore interface {

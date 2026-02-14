@@ -1,11 +1,14 @@
 package memory
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha1"
 	"database/sql"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -29,8 +32,12 @@ type Manager struct {
 	indexPath          string
 	topK               int
 	recencyDays        int
+	semanticEnabled    bool
+	semanticCandidates int
+	semanticRerankTopK int
 	embeddingsProvider string
 	embeddingsModel    string
+	embedder           Embedder
 	mu                 sync.Mutex
 }
 
@@ -86,8 +93,12 @@ func NewManager(cfg config.Config) *Manager {
 		indexPath:          filepath.Clean(indexPath),
 		topK:               topK,
 		recencyDays:        recencyDays,
+		semanticEnabled:    cfg.Features.SemanticMemory || cfg.Memory.Semantic.Enabled,
+		semanticCandidates: max(cfg.Memory.Semantic.TopKCandidates, topK),
+		semanticRerankTopK: max(cfg.Memory.Semantic.RerankTopK, topK),
 		embeddingsProvider: strings.TrimSpace(cfg.Memory.EmbeddingsProvider),
 		embeddingsModel:    strings.TrimSpace(cfg.Memory.EmbeddingsModel),
+		embedder:           NewEmbedder(cfg),
 	}
 }
 
@@ -194,7 +205,7 @@ func (m *Manager) Sync(_ context.Context) error {
 	return tx.Commit()
 }
 
-func (m *Manager) Search(_ context.Context, query string, limit int) ([]Chunk, error) {
+func (m *Manager) Search(ctx context.Context, query string, limit int) ([]Chunk, error) {
 	if !m.Enabled() {
 		return nil, nil
 	}
@@ -213,15 +224,24 @@ func (m *Manager) Search(_ context.Context, query string, limit int) ([]Chunk, e
 	}
 	defer db.Close()
 
-	results, err := m.searchFTS(db, query, limit*3)
+	candidateLimit := limit * 3
+	if m.semanticEnabled && m.semanticCandidates > candidateLimit {
+		candidateLimit = m.semanticCandidates
+	}
+	results, err := m.searchFTS(db, query, candidateLimit)
 	if err != nil || len(results) == 0 {
-		results, err = m.searchLike(db, query, limit*3)
+		results, err = m.searchLike(db, query, candidateLimit)
 		if err != nil {
 			return nil, err
 		}
 	}
 
 	m.applyHybridScore(results)
+	if m.semanticEnabled {
+		if err := m.applySemanticRerank(ctx, db, query, results); err != nil {
+			// Semantic reranking is best-effort and must not block lexical retrieval.
+		}
+	}
 	sort.Slice(results, func(i, j int) bool {
 		if results[i].Score == results[j].Score {
 			return results[i].ID < results[j].ID
@@ -229,6 +249,9 @@ func (m *Manager) Search(_ context.Context, query string, limit int) ([]Chunk, e
 		return results[i].Score > results[j].Score
 	})
 
+	if m.semanticEnabled && m.semanticRerankTopK > 0 && len(results) > m.semanticRerankTopK {
+		results = results[:m.semanticRerankTopK]
+	}
 	if len(results) > limit {
 		results = results[:limit]
 	}
@@ -498,10 +521,12 @@ func ensureSchema(db *sql.DB) (bool, error) {
 		provider TEXT NOT NULL,
 		model TEXT NOT NULL,
 		vector BLOB NOT NULL,
+		checksum TEXT NOT NULL DEFAULT '',
 		updated_at INTEGER NOT NULL
 	)`); err != nil {
 		return false, err
 	}
+	_, _ = db.Exec(`ALTER TABLE embeddings ADD COLUMN checksum TEXT NOT NULL DEFAULT ''`)
 
 	if _, err := db.Exec(`CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(id UNINDEXED, path UNINDEXED, kind UNINDEXED, day UNINDEXED, content)`); err != nil {
 		return false, nil
@@ -627,10 +652,6 @@ func (m *Manager) applyHybridScore(chunks []Chunk) {
 	now := time.Now().UTC()
 	for idx := range chunks {
 		lexical := chunks[idx].Score
-		vector := 0.0
-		if strings.TrimSpace(m.embeddingsProvider) != "" && strings.ToLower(strings.TrimSpace(m.embeddingsProvider)) != "none" {
-			vector = 0 // Embeddings are optional; lexical search remains the fallback baseline.
-		}
 		recencyBoost := 0.0
 		if chunks[idx].Day != "" {
 			if day, err := time.Parse("2006-01-02", chunks[idx].Day); err == nil {
@@ -640,8 +661,128 @@ func (m *Manager) applyHybridScore(chunks []Chunk) {
 				}
 			}
 		}
-		chunks[idx].Score = lexical + vector + recencyBoost
+		chunks[idx].Score = lexical + recencyBoost
 	}
+}
+
+func (m *Manager) applySemanticRerank(ctx context.Context, db *sql.DB, query string, chunks []Chunk) error {
+	if len(chunks) == 0 || m.embedder == nil {
+		return nil
+	}
+	if strings.EqualFold(strings.TrimSpace(m.embedder.Provider()), "none") {
+		return nil
+	}
+	queryVectors, err := m.embedder.Embed(ctx, []string{query})
+	if err != nil || len(queryVectors) == 0 || len(queryVectors[0]) == 0 {
+		return err
+	}
+	queryVector := queryVectors[0]
+	for idx := range chunks {
+		chunkVector, vectorErr := m.getOrCreateEmbedding(ctx, db, chunks[idx].ID, chunks[idx].Content)
+		if vectorErr != nil || len(chunkVector) == 0 {
+			continue
+		}
+		sim := cosineSimilarity(queryVector, chunkVector)
+		chunks[idx].Score += sim
+	}
+	return nil
+}
+
+func (m *Manager) getOrCreateEmbedding(ctx context.Context, db *sql.DB, chunkID, content string) ([]float32, error) {
+	checksum := checksumText(content)
+	providerName := strings.TrimSpace(m.embedder.Provider())
+	modelName := strings.TrimSpace(m.embedder.Model())
+
+	var storedProvider string
+	var storedModel string
+	var storedChecksum string
+	var storedVector []byte
+	row := db.QueryRow(`SELECT provider, model, checksum, vector FROM embeddings WHERE chunk_id = ?`, chunkID)
+	switch err := row.Scan(&storedProvider, &storedModel, &storedChecksum, &storedVector); err {
+	case nil:
+		if storedProvider == providerName && storedModel == modelName && storedChecksum == checksum {
+			return decodeVector(storedVector)
+		}
+	case sql.ErrNoRows:
+	default:
+		return nil, err
+	}
+
+	embedded, err := m.embedder.Embed(ctx, []string{content})
+	if err != nil || len(embedded) == 0 {
+		return nil, err
+	}
+	vector := embedded[0]
+	if len(vector) == 0 {
+		return nil, nil
+	}
+	encoded := encodeVector(vector)
+	_, err = db.Exec(
+		`INSERT INTO embeddings (chunk_id, provider, model, checksum, vector, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(chunk_id) DO UPDATE SET provider=excluded.provider, model=excluded.model, checksum=excluded.checksum, vector=excluded.vector, updated_at=excluded.updated_at`,
+		chunkID, providerName, modelName, checksum, encoded, time.Now().UTC().Unix(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return vector, nil
+}
+
+func checksumText(content string) string {
+	h := sha1.Sum([]byte(content))
+	return hex.EncodeToString(h[:])
+}
+
+func encodeVector(vector []float32) []byte {
+	if len(vector) == 0 {
+		return nil
+	}
+	buf := bytes.NewBuffer(make([]byte, 0, len(vector)*4))
+	for _, value := range vector {
+		_ = binary.Write(buf, binary.LittleEndian, value)
+	}
+	return buf.Bytes()
+}
+
+func decodeVector(blob []byte) ([]float32, error) {
+	if len(blob) == 0 {
+		return nil, nil
+	}
+	if len(blob)%4 != 0 {
+		return nil, fmt.Errorf("invalid vector blob")
+	}
+	out := make([]float32, len(blob)/4)
+	reader := bytes.NewReader(blob)
+	for idx := range out {
+		if err := binary.Read(reader, binary.LittleEndian, &out[idx]); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+func cosineSimilarity(a, b []float32) float64 {
+	if len(a) == 0 || len(b) == 0 {
+		return 0
+	}
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	var dot float64
+	var normA float64
+	var normB float64
+	for i := 0; i < n; i++ {
+		af := float64(a[i])
+		bf := float64(b[i])
+		dot += af * bf
+		normA += af * af
+		normB += bf * bf
+	}
+	if normA == 0 || normB == 0 {
+		return 0
+	}
+	return dot / (math.Sqrt(normA) * math.Sqrt(normB))
 }
 
 func readSource(path string) (string, int64, error) {

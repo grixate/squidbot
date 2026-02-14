@@ -22,6 +22,7 @@ import (
 	"github.com/grixate/squidbot/internal/config"
 	"github.com/grixate/squidbot/internal/memory"
 	"github.com/grixate/squidbot/internal/mission"
+	"github.com/grixate/squidbot/internal/plugins"
 	"github.com/grixate/squidbot/internal/provider"
 	"github.com/grixate/squidbot/internal/runtime/actor"
 	"github.com/grixate/squidbot/internal/subagent"
@@ -52,6 +53,7 @@ type Engine struct {
 	outbound            chan OutboundMessage
 	policy              *tools.PathPolicy
 	memory              *memory.Manager
+	plugins             plugins.Runtime
 	subagents           *subagent.Manager
 	budgetGuard         *budget.Guard
 	ulidMu              sync.Mutex
@@ -92,6 +94,11 @@ func NewEngine(cfg config.Config, providerClient provider.LLMProvider, model str
 		tokenSafetyCacheTTL: 2 * time.Second,
 		entropy:             ulid.Monotonic(mrand.New(mrand.NewSource(time.Now().UnixNano())), 0),
 	}
+	pluginRuntime := plugins.NewManager(cfg, logger)
+	if err := pluginRuntime.Discover(context.Background()); err != nil {
+		return nil, fmt.Errorf("plugin discovery failed: %w", err)
+	}
+	engine.plugins = pluginRuntime
 	system := actor.NewSystem(engine.newSessionHandler, cfg.Runtime.MailboxSize, cfg.Runtime.ActorIdleTTL.Duration)
 	system.SetActorHooks(func() { engine.metrics.ActiveActors.Add(1) }, func() { engine.metrics.ActiveActors.Add(-1) })
 	engine.actors = system
@@ -125,6 +132,9 @@ func (e *Engine) Close() error {
 	if e.subagents != nil {
 		e.subagents.Stop()
 	}
+	if e.plugins != nil {
+		_ = e.plugins.Close()
+	}
 	return e.actors.Stop()
 }
 
@@ -138,6 +148,7 @@ func (e *Engine) Submit(ctx context.Context, msg InboundMessage) (Ack, error) {
 	if strings.TrimSpace(msg.SessionID) == "" {
 		msg.SessionID = msg.Channel + ":" + msg.ChatID
 	}
+	msg.Metadata = ensureTraceMetadata(msg.Metadata, msg.RequestID)
 	_, err := e.actors.Submit(ctx, msg.SessionID, processRequest{Msg: msg}, false)
 	if err != nil {
 		return Ack{}, err
@@ -156,12 +167,152 @@ func (e *Engine) Ask(ctx context.Context, msg InboundMessage) (string, error) {
 	if strings.TrimSpace(msg.SessionID) == "" {
 		msg.SessionID = msg.Channel + ":" + msg.ChatID
 	}
+	msg.Metadata = ensureTraceMetadata(msg.Metadata, msg.RequestID)
 	res, err := e.actors.Submit(ctx, msg.SessionID, processRequest{Msg: msg}, true)
 	if err != nil {
 		return "", err
 	}
 	response, _ := res.(string)
 	return response, nil
+}
+
+func (e *Engine) AskStream(ctx context.Context, msg InboundMessage, sink StreamSink) error {
+	if sink == nil {
+		return fmt.Errorf("stream sink is required")
+	}
+	if msg.RequestID == "" {
+		msg.RequestID = e.nextID()
+	}
+	if msg.CreatedAt.IsZero() {
+		msg.CreatedAt = time.Now().UTC()
+	}
+	if strings.TrimSpace(msg.SessionID) == "" {
+		msg.SessionID = msg.Channel + ":" + msg.ChatID
+	}
+	msg.Metadata = ensureTraceMetadata(msg.Metadata, msg.RequestID)
+	cfg := e.currentConfig()
+	providerClient, model := e.currentProviderModel()
+	if providerClient.Capabilities().SupportsStream {
+		history, err := e.store.Window(ctx, msg.SessionID, 50)
+		if err == nil {
+			systemPrompt := buildSystemPrompt(cfg, msg.Content)
+			messages := buildMessages(systemPrompt, history, msg.Content)
+			events, errs := providerClient.Stream(ctx, provider.ChatRequest{
+				Messages:    messages,
+				Model:       model,
+				MaxTokens:   cfg.Agents.Defaults.MaxTokens,
+				Temperature: cfg.Agents.Defaults.Temperature,
+			})
+			var final strings.Builder
+			for events != nil || errs != nil {
+				select {
+				case event, ok := <-events:
+					if !ok {
+						events = nil
+						continue
+					}
+					if event.ToolCall != nil {
+						_ = sink.OnEvent(ctx, StreamEvent{
+							Type:       "tool_call_started",
+							ToolName:   event.ToolCall.Name,
+							ToolCallID: event.ToolCall.ID,
+						})
+						continue
+					}
+					if strings.TrimSpace(event.DeltaContent) != "" {
+						final.WriteString(event.DeltaContent)
+						if err := sink.OnEvent(ctx, StreamEvent{Type: "assistant_delta", Delta: event.DeltaContent}); err != nil {
+							return err
+						}
+					}
+				case streamErr, ok := <-errs:
+					if !ok {
+						errs = nil
+						continue
+					}
+					if streamErr != nil {
+						_ = sink.OnEvent(ctx, StreamEvent{Type: "error", Error: streamErr.Error(), Done: true})
+						return streamErr
+					}
+				}
+			}
+			finalContent := strings.TrimSpace(final.String())
+			if finalContent == "" {
+				finalContent = "I've completed processing but have no response to provide."
+			}
+			_ = e.store.AppendTurn(ctx, Turn{SessionID: msg.SessionID, Role: "user", Content: msg.Content})
+			_ = e.store.AppendTurn(ctx, Turn{SessionID: msg.SessionID, Role: "assistant", Content: finalContent})
+			_ = e.store.SaveSessionMeta(ctx, msg.SessionID, map[string]interface{}{"last_channel": msg.Channel, "last_chat_id": msg.ChatID})
+			if msg.Channel != "cli" {
+				traceID, _ := msg.Metadata["trace_id"].(string)
+				e.send(msg.Channel, msg.ChatID, finalContent, map[string]interface{}{"session_id": msg.SessionID, "trace_id": traceID})
+			}
+			e.appendDailyMemory(ctx, msg, finalContent)
+			return sink.OnEvent(ctx, StreamEvent{Type: "final", Content: finalContent, Done: true})
+		}
+	}
+
+	response, err := e.Ask(ctx, msg)
+	if err != nil {
+		_ = sink.OnEvent(ctx, StreamEvent{Type: "error", Error: err.Error(), Done: true})
+		return err
+	}
+	for _, chunk := range streamChunks(response, 80) {
+		if strings.TrimSpace(chunk) == "" {
+			continue
+		}
+		if err := sink.OnEvent(ctx, StreamEvent{Type: "assistant_delta", Delta: chunk}); err != nil {
+			return err
+		}
+	}
+	return sink.OnEvent(ctx, StreamEvent{Type: "final", Content: response, Done: true})
+}
+
+func streamChunks(content string, chunkSize int) []string {
+	if chunkSize <= 0 {
+		chunkSize = 80
+	}
+	if len(content) <= chunkSize {
+		return []string{content}
+	}
+	out := make([]string, 0, (len(content)/chunkSize)+1)
+	for start := 0; start < len(content); start += chunkSize {
+		end := start + chunkSize
+		if end > len(content) {
+			end = len(content)
+		}
+		out = append(out, content[start:end])
+	}
+	return out
+}
+
+type pluginRuntimeTool struct {
+	name        string
+	description string
+	schema      map[string]any
+	call        func(ctx context.Context, args json.RawMessage) (tools.ToolResult, error)
+}
+
+func (t *pluginRuntimeTool) Name() string {
+	return t.name
+}
+
+func (t *pluginRuntimeTool) Description() string {
+	return t.description
+}
+
+func (t *pluginRuntimeTool) Schema() map[string]any {
+	if len(t.schema) == 0 {
+		return map[string]any{"type": "object"}
+	}
+	return t.schema
+}
+
+func (t *pluginRuntimeTool) Execute(ctx context.Context, args json.RawMessage) (tools.ToolResult, error) {
+	if t.call == nil {
+		return tools.ToolResult{}, fmt.Errorf("plugin tool is not configured")
+	}
+	return t.call(ctx, args)
 }
 
 func (e *Engine) Snapshot(ctx context.Context, sessionID string) (SessionSnapshot, error) {
@@ -174,6 +325,12 @@ func (e *Engine) Snapshot(ctx context.Context, sessionID string) (SessionSnapsho
 
 func (e *Engine) send(channel, chatID, content string, metadata map[string]interface{}) {
 	msg := OutboundMessage{Channel: channel, ChatID: chatID, Content: content, Metadata: make(map[string]any)}
+	if metadata == nil {
+		metadata = map[string]interface{}{}
+	}
+	if _, ok := metadata["trace_id"]; !ok {
+		metadata["trace_id"] = e.nextID()
+	}
 	for k, v := range metadata {
 		msg.Metadata[k] = v
 	}
@@ -183,6 +340,20 @@ func (e *Engine) send(channel, chatID, content string, metadata map[string]inter
 	default:
 		e.log.Printf("outbound channel full; dropping message channel=%s chat_id=%s", channel, chatID)
 	}
+}
+
+func ensureTraceMetadata(metadata map[string]any, fallback string) map[string]any {
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	traceID, _ := metadata["trace_id"].(string)
+	if strings.TrimSpace(traceID) == "" {
+		if strings.TrimSpace(fallback) == "" {
+			fallback = fmt.Sprintf("trace-%d", time.Now().UTC().UnixNano())
+		}
+		metadata["trace_id"] = fallback
+	}
+	return metadata
 }
 
 func (e *Engine) nextID() string {
@@ -244,6 +415,7 @@ func (h *sessionHandler) process(ctx context.Context, msg InboundMessage) (strin
 	defer h.engine.metrics.ActiveTurns.Add(-1)
 
 	cfg := h.engine.currentConfig()
+	traceID, _ := msg.Metadata["trace_id"].(string)
 	turnTimeout := time.Duration(cfg.Agents.Defaults.TurnTimeoutSec) * time.Second
 	if turnTimeout <= 0 {
 		turnTimeout = 120 * time.Second
@@ -339,12 +511,23 @@ func (h *sessionHandler) process(ctx context.Context, msg InboundMessage) (strin
 					h.engine.metrics.ToolErrors.Add(1)
 					result = tools.ToolResult{Text: toolErr.Error()}
 				}
+				toolMeta := map[string]any{"trace_id": traceID}
+				for key, value := range result.Metadata {
+					toolMeta[key] = value
+				}
+				var toolMetadata json.RawMessage
+				if len(toolMeta) > 0 {
+					if encoded, marshalErr := json.Marshal(toolMeta); marshalErr == nil {
+						toolMetadata = encoded
+					}
+				}
 
 				_ = h.engine.store.AppendToolEvent(turnCtx, ToolEvent{
 					SessionID: h.sessionID,
 					ToolName:  tc.Name,
 					Input:     string(tc.Arguments),
 					Output:    result.Text,
+					Metadata:  toolMetadata,
 				})
 				messages = append(messages, provider.Message{Role: "tool", ToolCallID: tc.ID, Name: tc.Name, Content: result.Text})
 			}
@@ -374,7 +557,7 @@ func (h *sessionHandler) process(ctx context.Context, msg InboundMessage) (strin
 	_ = h.engine.store.SaveSessionMeta(turnCtx, h.sessionID, map[string]interface{}{"last_channel": msg.Channel, "last_chat_id": msg.ChatID})
 
 	if msg.Channel != "cli" {
-		h.engine.send(msg.Channel, msg.ChatID, finalContent, map[string]interface{}{"session_id": msg.SessionID})
+		h.engine.send(msg.Channel, msg.ChatID, finalContent, map[string]interface{}{"session_id": msg.SessionID, "trace_id": traceID})
 	}
 	h.engine.appendDailyMemory(turnCtx, msg, finalContent)
 	return finalContent, nil
@@ -452,15 +635,22 @@ func (e *Engine) buildRegistry(msg InboundMessage) (*tools.Registry, error) {
 	cfg := e.currentConfig()
 	registry := tools.NewRegistry()
 	registry.Register(tools.NewReadFileTool(e.policy))
-	registry.Register(tools.NewWriteFileTool(e.policy))
-	registry.Register(tools.NewEditFileTool(e.policy))
+	if cfg.Tools.Filesystem.ParentWriteEnabled {
+		registry.Register(tools.NewWriteFileTool(e.policy))
+		registry.Register(tools.NewEditFileTool(e.policy))
+	}
 	registry.Register(tools.NewListDirTool(e.policy))
-	registry.Register(tools.NewExecTool(e.policy, time.Duration(cfg.Agents.Defaults.ToolTimeoutSec)*time.Second))
+	registry.Register(tools.NewExecToolWithPolicy(e.policy, time.Duration(cfg.Agents.Defaults.ToolTimeoutSec)*time.Second, tools.ExecPolicy{
+		Enabled:         cfg.Tools.Exec.Enabled,
+		AllowedCommands: cfg.Tools.Exec.AllowedCommands,
+		BlockedCommands: cfg.Tools.Exec.BlockedCommands,
+	}))
 	registry.Register(tools.NewWebSearchTool(cfg.Tools.Web.Search.APIKey, cfg.Tools.Web.Search.MaxResults))
 	registry.Register(tools.NewWebFetchTool(50000))
 
 	messageTool := tools.NewMessageTool(func(ctx context.Context, channel, chatID, content string) error {
-		e.send(channel, chatID, content, map[string]interface{}{"session_id": msg.SessionID, "source": "tool:message"})
+		traceID, _ := msg.Metadata["trace_id"].(string)
+		e.send(channel, chatID, content, map[string]interface{}{"session_id": msg.SessionID, "source": "tool:message", "trace_id": traceID})
 		return nil
 	})
 	messageTool.SetContext(msg.Channel, msg.ChatID, msg.SessionID)
@@ -512,6 +702,24 @@ func (e *Engine) buildRegistry(msg InboundMessage) (*tools.Registry, error) {
 	updateTaskTool := tools.NewUpdateTaskTool(e.updateMissionTask)
 	updateTaskTool.SetContext(msg.SessionID, msg.Channel, msg.ChatID, msg.RequestID, msg.SenderID)
 	registry.Register(updateTaskTool)
+
+	if e.plugins != nil {
+		for _, pluginTool := range e.plugins.Tools() {
+			toolDef := pluginTool
+			registry.Register(&pluginRuntimeTool{
+				name:        toolDef.NamespacedName,
+				description: toolDef.Description,
+				schema:      toolDef.Schema,
+				call: func(ctx context.Context, args json.RawMessage) (tools.ToolResult, error) {
+					result, err := e.plugins.Call(ctx, toolDef.NamespacedName, args)
+					if err != nil {
+						return tools.ToolResult{}, err
+					}
+					return tools.ToolResult{Text: result.Text, Metadata: result.Metadata}, nil
+				},
+			})
+		}
+	}
 
 	return registry, nil
 }
@@ -1043,12 +1251,16 @@ func (e *Engine) runSubtask(ctx context.Context, run subagent.Run) (subagent.Res
 	messages = append(messages, provider.Message{Role: "user", Content: run.Task})
 	registry := tools.NewRegistry()
 	registry.Register(tools.NewReadFileTool(e.policy))
-	if cfg.Runtime.Subagents.AllowWrites {
+	if cfg.Tools.Filesystem.SubagentWriteEnabled || cfg.Runtime.Subagents.AllowWrites {
 		registry.Register(tools.NewWriteFileTool(e.policy))
 		registry.Register(tools.NewEditFileTool(e.policy))
 	}
 	registry.Register(tools.NewListDirTool(e.policy))
-	registry.Register(tools.NewExecTool(e.policy, time.Duration(cfg.Agents.Defaults.ToolTimeoutSec)*time.Second))
+	registry.Register(tools.NewExecToolWithPolicy(e.policy, time.Duration(cfg.Agents.Defaults.ToolTimeoutSec)*time.Second, tools.ExecPolicy{
+		Enabled:         cfg.Tools.Exec.Enabled,
+		AllowedCommands: cfg.Tools.Exec.AllowedCommands,
+		BlockedCommands: cfg.Tools.Exec.BlockedCommands,
+	}))
 	registry.Register(tools.NewWebSearchTool(cfg.Tools.Web.Search.APIKey, cfg.Tools.Web.Search.MaxResults))
 	registry.Register(tools.NewWebFetchTool(30000))
 

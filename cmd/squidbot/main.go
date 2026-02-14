@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -22,6 +23,7 @@ import (
 	"github.com/grixate/squidbot/internal/config"
 	"github.com/grixate/squidbot/internal/cron"
 	"github.com/grixate/squidbot/internal/memory"
+	"github.com/grixate/squidbot/internal/plugins"
 	"github.com/grixate/squidbot/internal/skills"
 	storepkg "github.com/grixate/squidbot/internal/storage/bbolt"
 	"github.com/grixate/squidbot/internal/subagent"
@@ -202,6 +204,16 @@ func statusCmd(configPath string) *cobra.Command {
 			}
 			fmt.Printf("Storage backend: %s\n", cfg.Storage.Backend)
 			fmt.Printf("Telegram enabled: %v\n", cfg.Channels.Telegram.Enabled)
+			fmt.Printf("Feature flags: streaming=%v channelsWave1=%v semanticMemory=%v plugins=%v metricsHttp=%v\n",
+				cfg.Features.Streaming, cfg.Features.ChannelsWave1, cfg.Features.SemanticMemory, cfg.Features.Plugins, cfg.Features.MetricsHTTP)
+			fmt.Printf("Tool policy: execEnabled=%v parentWrite=%v subagentWrite=%v\n",
+				cfg.Tools.Exec.Enabled, cfg.Tools.Filesystem.ParentWriteEnabled, cfg.Tools.Filesystem.SubagentWriteEnabled)
+			fmt.Printf("Plugins runtime: enabled=%v paths=%d timeoutSec=%d maxConcurrent=%d maxProcesses=%d\n",
+				cfg.Runtime.Plugins.Enabled, len(cfg.Runtime.Plugins.Paths), cfg.Runtime.Plugins.DefaultTimeoutSec, cfg.Runtime.Plugins.MaxConcurrent, cfg.Runtime.Plugins.MaxProcesses)
+			fmt.Printf("Metrics HTTP: enabled=%v listen=%s localhostOnly=%v authTokenSet=%v\n",
+				cfg.Runtime.MetricsHTTP.Enabled, cfg.Runtime.MetricsHTTP.ListenAddr, cfg.Runtime.MetricsHTTP.LocalhostOnly, strings.TrimSpace(cfg.Runtime.MetricsHTTP.AuthToken) != "")
+			fmt.Printf("Semantic memory: enabled=%v topKCandidates=%d rerankTopK=%d\n",
+				cfg.Memory.Semantic.Enabled, cfg.Memory.Semantic.TopKCandidates, cfg.Memory.Semantic.RerankTopK)
 			return nil
 		},
 	}
@@ -210,6 +222,7 @@ func statusCmd(configPath string) *cobra.Command {
 func agentCmd(configPath string, logger *log.Logger) *cobra.Command {
 	var message string
 	var sessionID string
+	var stream bool
 	cmd := &cobra.Command{
 		Use:   "agent",
 		Short: "Chat with squidbot directly",
@@ -235,7 +248,7 @@ func agentCmd(configPath string, logger *log.Logger) *cobra.Command {
 			}
 
 			if strings.TrimSpace(message) != "" {
-				resp, err := runtime.Engine.Ask(context.Background(), agent.InboundMessage{
+				inbound := agent.InboundMessage{
 					SessionID: sessionID,
 					RequestID: "",
 					Channel:   "cli",
@@ -243,7 +256,29 @@ func agentCmd(configPath string, logger *log.Logger) *cobra.Command {
 					SenderID:  "user",
 					Content:   message,
 					CreatedAt: time.Now().UTC(),
-				})
+				}
+				if stream {
+					var final string
+					err := runtime.Engine.AskStream(context.Background(), inbound, agent.StreamSinkFunc(func(ctx context.Context, event agent.StreamEvent) error {
+						switch event.Type {
+						case "assistant_delta":
+							fmt.Print(event.Delta)
+						case "final":
+							final = event.Content
+						case "error":
+							return errors.New(event.Error)
+						}
+						return nil
+					}))
+					if err != nil {
+						return err
+					}
+					if strings.TrimSpace(final) != "" {
+						fmt.Println()
+					}
+					return nil
+				}
+				resp, err := runtime.Engine.Ask(context.Background(), inbound)
 				if err != nil {
 					return err
 				}
@@ -304,6 +339,7 @@ func agentCmd(configPath string, logger *log.Logger) *cobra.Command {
 	}
 	cmd.Flags().StringVarP(&message, "message", "m", "", "Message to send")
 	cmd.Flags().StringVarP(&sessionID, "session", "s", "cli:default", "Session ID")
+	cmd.Flags().BoolVar(&stream, "stream", false, "Stream response chunks")
 	return cmd
 }
 
@@ -864,6 +900,70 @@ func doctorCmd(configPath string) *cobra.Command {
 			if cfg.Channels.Telegram.Enabled && strings.TrimSpace(cfg.Channels.Telegram.Token) == "" {
 				problems = append(problems, "Telegram enabled but token missing")
 			}
+			if cfg.Features.ChannelsWave1 {
+				slackCfg := cfg.Channels.Registry["slack"]
+				if slackCfg.Enabled {
+					if strings.TrimSpace(slackCfg.Token) == "" {
+						problems = append(problems, "channel \"slack\" enabled but token missing")
+					}
+					if strings.TrimSpace(slackCfg.Metadata["listen_addr"]) == "" {
+						problems = append(problems, "channel \"slack\" enabled but metadata.listen_addr missing")
+					}
+				}
+				discordCfg := cfg.Channels.Registry["discord"]
+				if discordCfg.Enabled {
+					if strings.TrimSpace(discordCfg.Token) == "" {
+						problems = append(problems, "channel \"discord\" enabled but token missing")
+					}
+					if strings.TrimSpace(discordCfg.Metadata["listen_addr"]) == "" {
+						problems = append(problems, "channel \"discord\" enabled but metadata.listen_addr missing")
+					}
+					if strings.TrimSpace(discordCfg.Metadata["public_key"]) == "" {
+						problems = append(problems, "channel \"discord\" enabled but metadata.public_key missing")
+					}
+				}
+				webchatCfg := cfg.Channels.Registry["webchat"]
+				if webchatCfg.Enabled && strings.TrimSpace(webchatCfg.Metadata["listen_addr"]) == "" {
+					problems = append(problems, "channel \"webchat\" enabled but metadata.listen_addr missing")
+				}
+			}
+			whatsAppCfg := cfg.Channels.Registry["whatsapp"]
+			if whatsAppCfg.Enabled && (strings.TrimSpace(whatsAppCfg.Token) != "" || strings.TrimSpace(whatsAppCfg.Metadata["listen_addr"]) != "") {
+				if strings.TrimSpace(whatsAppCfg.Token) == "" {
+					problems = append(problems, "channel \"whatsapp\" native mode requires token")
+				}
+				if strings.TrimSpace(whatsAppCfg.Metadata["listen_addr"]) == "" {
+					problems = append(problems, "channel \"whatsapp\" native mode requires metadata.listen_addr")
+				}
+				if strings.TrimSpace(whatsAppCfg.Metadata["phone_number_id"]) == "" {
+					problems = append(problems, "channel \"whatsapp\" native mode requires metadata.phone_number_id")
+				}
+			}
+			if cfg.Features.Streaming {
+				caps := cfg.PrimaryProvider
+				_, providerCfg := caps()
+				if strings.TrimSpace(providerCfg.Model) == "" && strings.TrimSpace(cfg.Agents.Defaults.Model) == "" {
+					problems = append(problems, "streaming enabled but provider model is empty")
+				}
+			}
+			if cfg.Features.Plugins || cfg.Runtime.Plugins.Enabled {
+				if len(cfg.Runtime.Plugins.Paths) == 0 {
+					problems = append(problems, "plugins enabled but runtime.plugins.paths is empty")
+				}
+			}
+			if cfg.Features.MetricsHTTP || cfg.Runtime.MetricsHTTP.Enabled {
+				if strings.TrimSpace(cfg.Runtime.MetricsHTTP.ListenAddr) == "" {
+					problems = append(problems, "metrics http enabled but listenAddr missing")
+				}
+			}
+			if cfg.Features.SemanticMemory || cfg.Memory.Semantic.Enabled {
+				if cfg.Memory.Semantic.TopKCandidates <= 0 {
+					problems = append(problems, "semantic memory topKCandidates must be > 0")
+				}
+				if cfg.Memory.Semantic.RerankTopK <= 0 {
+					problems = append(problems, "semantic memory rerankTopK must be > 0")
+				}
+			}
 			workspace := config.WorkspacePath(cfg)
 			required := []string{
 				filepath.Join(workspace, "AGENTS.md"),
@@ -884,6 +984,13 @@ func doctorCmd(configPath string) *cobra.Command {
 			mem := memory.NewManager(cfg)
 			if err := mem.EnsureIndex(cmd.Context()); err != nil {
 				problems = append(problems, "memory index unavailable: "+err.Error())
+			}
+			if cfg.Features.Plugins || cfg.Runtime.Plugins.Enabled {
+				pluginRuntime := plugins.NewManager(cfg, log.Default())
+				if err := pluginRuntime.Discover(cmd.Context()); err != nil {
+					problems = append(problems, "plugin discovery failed: "+err.Error())
+				}
+				_ = pluginRuntime.Close()
 			}
 			discovery := skills.Discover(cfg)
 			fmt.Printf("Skills discovered: %d\n", len(discovery.Skills))

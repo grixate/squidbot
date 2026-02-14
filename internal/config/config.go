@@ -18,6 +18,7 @@ type Config struct {
 	Providers ProvidersConfig `json:"providers"`
 	Channels  ChannelsConfig  `json:"channels"`
 	Tools     ToolsConfig     `json:"tools"`
+	Features  FeaturesConfig  `json:"features"`
 	Gateway   GatewayConfig   `json:"gateway"`
 	Auth      AuthConfig      `json:"auth"`
 	Storage   StorageConfig   `json:"storage"`
@@ -91,7 +92,28 @@ type PluginChannelConfig struct {
 }
 
 type ToolsConfig struct {
-	Web WebToolsConfig `json:"web"`
+	Web        WebToolsConfig        `json:"web"`
+	Exec       ExecToolsConfig       `json:"exec"`
+	Filesystem FilesystemToolsConfig `json:"fs"`
+}
+
+type ExecToolsConfig struct {
+	Enabled         bool     `json:"enabled"`
+	AllowedCommands []string `json:"allowedCommands,omitempty"`
+	BlockedCommands []string `json:"blockedCommands,omitempty"`
+}
+
+type FilesystemToolsConfig struct {
+	ParentWriteEnabled   bool `json:"parentWriteEnabled"`
+	SubagentWriteEnabled bool `json:"subagentWriteEnabled"`
+}
+
+type FeaturesConfig struct {
+	Streaming      bool `json:"streaming"`
+	ChannelsWave1  bool `json:"channelsWave1"`
+	SemanticMemory bool `json:"semanticMemory"`
+	Plugins        bool `json:"plugins"`
+	MetricsHTTP    bool `json:"metricsHttp"`
 }
 
 type WebToolsConfig struct {
@@ -123,7 +145,24 @@ type RuntimeConfig struct {
 	ActorIdleTTL         DurationValue            `json:"actorIdleTtl"`
 	HeartbeatIntervalSec int                      `json:"heartbeatIntervalSec"`
 	Subagents            SubagentRuntimeConfig    `json:"subagents"`
+	Plugins              PluginsRuntimeConfig     `json:"plugins"`
+	MetricsHTTP          MetricsHTTPRuntimeConfig `json:"metricsHttp"`
 	TokenSafety          TokenSafetyRuntimeConfig `json:"tokenSafety"`
+}
+
+type PluginsRuntimeConfig struct {
+	Enabled           bool     `json:"enabled"`
+	Paths             []string `json:"paths"`
+	DefaultTimeoutSec int      `json:"defaultTimeoutSec"`
+	MaxConcurrent     int      `json:"maxConcurrent"`
+	MaxProcesses      int      `json:"maxProcesses"`
+}
+
+type MetricsHTTPRuntimeConfig struct {
+	Enabled       bool   `json:"enabled"`
+	ListenAddr    string `json:"listenAddr"`
+	AuthToken     string `json:"authToken,omitempty"`
+	LocalhostOnly bool   `json:"localhostOnly"`
 }
 
 type SubagentRuntimeConfig struct {
@@ -154,12 +193,19 @@ type TokenSafetyRuntimeConfig struct {
 }
 
 type MemoryConfig struct {
-	Enabled            bool   `json:"enabled"`
-	IndexPath          string `json:"indexPath"`
-	TopK               int    `json:"topK"`
-	RecencyDays        int    `json:"recencyDays"`
-	EmbeddingsProvider string `json:"embeddingsProvider"`
-	EmbeddingsModel    string `json:"embeddingsModel"`
+	Enabled            bool                 `json:"enabled"`
+	IndexPath          string               `json:"indexPath"`
+	TopK               int                  `json:"topK"`
+	RecencyDays        int                  `json:"recencyDays"`
+	EmbeddingsProvider string               `json:"embeddingsProvider"`
+	EmbeddingsModel    string               `json:"embeddingsModel"`
+	Semantic           MemorySemanticConfig `json:"semantic"`
+}
+
+type MemorySemanticConfig struct {
+	Enabled        bool `json:"enabled"`
+	TopKCandidates int  `json:"topKCandidates"`
+	RerankTopK     int  `json:"rerankTopK"`
 }
 
 type SkillsConfig struct {
@@ -272,6 +318,22 @@ func Default() Config {
 					MaxResults: 5,
 				},
 			},
+			Exec: ExecToolsConfig{
+				Enabled:         false,
+				AllowedCommands: []string{},
+				BlockedCommands: []string{"rm", "shutdown", "reboot", "mkfs", "dd"},
+			},
+			Filesystem: FilesystemToolsConfig{
+				ParentWriteEnabled:   false,
+				SubagentWriteEnabled: false,
+			},
+		},
+		Features: FeaturesConfig{
+			Streaming:      false,
+			ChannelsWave1:  false,
+			SemanticMemory: false,
+			Plugins:        false,
+			MetricsHTTP:    false,
 		},
 		Gateway: GatewayConfig{
 			Host: "0.0.0.0",
@@ -298,6 +360,19 @@ func Default() Config {
 				NotifyOnComplete:   true,
 				ReinjectCompletion: false,
 			},
+			Plugins: PluginsRuntimeConfig{
+				Enabled:           false,
+				Paths:             []string{filepath.Join(workspace, "plugins")},
+				DefaultTimeoutSec: 60,
+				MaxConcurrent:     4,
+				MaxProcesses:      8,
+			},
+			MetricsHTTP: MetricsHTTPRuntimeConfig{
+				Enabled:       false,
+				ListenAddr:    "127.0.0.1:19090",
+				AuthToken:     "",
+				LocalhostOnly: true,
+			},
 			TokenSafety: TokenSafetyRuntimeConfig{
 				Enabled:                     true,
 				Mode:                        "hybrid",
@@ -319,6 +394,11 @@ func Default() Config {
 			RecencyDays:        30,
 			EmbeddingsProvider: "none",
 			EmbeddingsModel:    "",
+			Semantic: MemorySemanticConfig{
+				Enabled:        false,
+				TopKCandidates: 24,
+				RerankTopK:     8,
+			},
 		},
 		Skills: SkillsConfig{
 			Paths: []string{filepath.Join(workspace, "skills")},
@@ -368,16 +448,21 @@ func Load(path string) (Config, error) {
 	bytes, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			normalizeDefaultChannels(&cfg)
 			applyEnvOverrides(&cfg)
 			return cfg, nil
 		}
 		return cfg, err
 	}
+	var raw map[string]any
+	_ = json.Unmarshal(bytes, &raw)
 	if err := json.Unmarshal(bytes, &cfg); err != nil {
 		return cfg, err
 	}
+	applyLegacyCompatibilityDefaults(&cfg, raw)
 	migrateLegacyProviders(&cfg)
 	migrateLegacyChannels(&cfg)
+	normalizeDefaultChannels(&cfg)
 	applyEnvOverrides(&cfg)
 	return cfg, nil
 }
@@ -431,6 +516,8 @@ func applyEnvOverrides(cfg *Config) {
 		"SQUIDBOT_MEMORY_INDEX_PATH":          &cfg.Memory.IndexPath,
 		"SQUIDBOT_MEMORY_EMBEDDINGS_PROVIDER": &cfg.Memory.EmbeddingsProvider,
 		"SQUIDBOT_MEMORY_EMBEDDINGS_MODEL":    &cfg.Memory.EmbeddingsModel,
+		"SQUIDBOT_METRICS_HTTP_LISTEN_ADDR":   &cfg.Runtime.MetricsHTTP.ListenAddr,
+		"SQUIDBOT_METRICS_HTTP_AUTH_TOKEN":    &cfg.Runtime.MetricsHTTP.AuthToken,
 	}
 	for key, target := range env {
 		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
@@ -442,6 +529,85 @@ func applyEnvOverrides(cfg *Config) {
 		parsed, err := strconv.ParseBool(value)
 		if err == nil {
 			cfg.Channels.Telegram.Enabled = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_FEATURE_STREAMING")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			cfg.Features.Streaming = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_FEATURE_CHANNELS_WAVE1")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			cfg.Features.ChannelsWave1 = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_FEATURE_SEMANTIC_MEMORY")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			cfg.Features.SemanticMemory = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_FEATURE_PLUGINS")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			cfg.Features.Plugins = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_FEATURE_METRICS_HTTP")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			cfg.Features.MetricsHTTP = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_TOOLS_EXEC_ENABLED")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			cfg.Tools.Exec.Enabled = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_TOOLS_EXEC_ALLOWED_COMMANDS")); value != "" {
+		cfg.Tools.Exec.AllowedCommands = splitCSV(value)
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_TOOLS_EXEC_BLOCKED_COMMANDS")); value != "" {
+		cfg.Tools.Exec.BlockedCommands = splitCSV(value)
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_TOOLS_FS_PARENT_WRITE_ENABLED")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			cfg.Tools.Filesystem.ParentWriteEnabled = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_TOOLS_FS_SUBAGENT_WRITE_ENABLED")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			cfg.Tools.Filesystem.SubagentWriteEnabled = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_RUNTIME_PLUGINS_ENABLED")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			cfg.Runtime.Plugins.Enabled = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_RUNTIME_PLUGINS_PATHS")); value != "" {
+		cfg.Runtime.Plugins.Paths = splitCSV(value)
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_RUNTIME_PLUGINS_DEFAULT_TIMEOUT_SEC")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.Runtime.Plugins.DefaultTimeoutSec = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_RUNTIME_PLUGINS_MAX_CONCURRENT")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.Runtime.Plugins.MaxConcurrent = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_RUNTIME_PLUGINS_MAX_PROCESSES")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.Runtime.Plugins.MaxProcesses = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_METRICS_HTTP_ENABLED")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			cfg.Runtime.MetricsHTTP.Enabled = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_METRICS_HTTP_LOCALHOST_ONLY")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			cfg.Runtime.MetricsHTTP.LocalhostOnly = parsed
 		}
 	}
 	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_MEMORY_ENABLED")); value != "" {
@@ -460,6 +626,21 @@ func applyEnvOverrides(cfg *Config) {
 		parsed, err := strconv.Atoi(value)
 		if err == nil && parsed > 0 {
 			cfg.Memory.RecencyDays = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_MEMORY_SEMANTIC_ENABLED")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			cfg.Memory.Semantic.Enabled = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_MEMORY_SEMANTIC_TOPK_CANDIDATES")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.Memory.Semantic.TopKCandidates = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_MEMORY_SEMANTIC_RERANK_TOPK")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.Memory.Semantic.RerankTopK = parsed
 		}
 	}
 	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_SKILLS_PATHS")); value != "" {
@@ -599,6 +780,7 @@ func applyEnvOverrides(cfg *Config) {
 	applyDynamicChannelEnvOverrides(cfg)
 	migrateLegacyProviders(cfg)
 	migrateLegacyChannels(cfg)
+	normalizeDefaultChannels(cfg)
 }
 
 func splitCSV(value string) []string {
@@ -885,6 +1067,59 @@ func migrateLegacyChannels(cfg *Config) {
 		Token:     strings.TrimSpace(telegram.Token),
 		AllowFrom: normalizeAllowFrom(telegram.AllowFrom),
 	}
+}
+
+func normalizeDefaultChannels(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	if cfg.Channels.Registry == nil {
+		cfg.Channels.Registry = map[string]GenericChannelConfig{}
+	}
+	defaults := map[string]GenericChannelConfig{
+		"slack":    {Label: "Slack", Kind: "core"},
+		"discord":  {Label: "Discord", Kind: "core"},
+		"webchat":  {Label: "Web Chat", Kind: "core"},
+		"whatsapp": {Label: "WhatsApp", Kind: "core"},
+	}
+	for channelID, defaultsCfg := range defaults {
+		current := cfg.Channels.Registry[channelID]
+		current.Label = defaultString(current.Label, defaultsCfg.Label)
+		current.Kind = defaultString(current.Kind, defaultsCfg.Kind)
+		cfg.Channels.Registry[channelID] = current
+	}
+}
+
+func applyLegacyCompatibilityDefaults(cfg *Config, raw map[string]any) {
+	if cfg == nil {
+		return
+	}
+	// Existing configs that predate hardening retain old behavior by default.
+	if !nestedPathExists(raw, "tools", "exec", "enabled") {
+		cfg.Tools.Exec.Enabled = true
+	}
+	if !nestedPathExists(raw, "tools", "fs", "parentWriteEnabled") {
+		cfg.Tools.Filesystem.ParentWriteEnabled = true
+	}
+	if !nestedPathExists(raw, "tools", "fs", "subagentWriteEnabled") {
+		cfg.Tools.Filesystem.SubagentWriteEnabled = cfg.Runtime.Subagents.AllowWrites
+	}
+}
+
+func nestedPathExists(root map[string]any, path ...string) bool {
+	current := any(root)
+	for _, key := range path {
+		obj, ok := current.(map[string]any)
+		if !ok {
+			return false
+		}
+		next, exists := obj[key]
+		if !exists {
+			return false
+		}
+		current = next
+	}
+	return true
 }
 
 func applyDynamicProviderEnvOverrides(cfg *Config) {

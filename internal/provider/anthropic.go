@@ -28,15 +28,29 @@ func NewAnthropicProvider(apiKey, model string) *AnthropicProvider {
 }
 
 func (p *AnthropicProvider) Capabilities() ProviderCapabilities {
-	return ProviderCapabilities{SupportsTools: true, SupportsStream: false, SupportsJSONOut: false}
+	return ProviderCapabilities{SupportsTools: true, SupportsStream: true, SupportsJSONOut: false}
 }
 
-func (p *AnthropicProvider) Stream(_ context.Context, _ ChatRequest) (<-chan StreamEvent, <-chan error) {
-	events := make(chan StreamEvent)
+func (p *AnthropicProvider) Stream(ctx context.Context, req ChatRequest) (<-chan StreamEvent, <-chan error) {
+	events := make(chan StreamEvent, 8)
 	errs := make(chan error, 1)
-	close(events)
-	errs <- fmt.Errorf("streaming not implemented")
-	close(errs)
+	go func() {
+		defer close(events)
+		defer close(errs)
+		resp, err := p.Chat(ctx, req)
+		if err != nil {
+			errs <- err
+			return
+		}
+		if resp.Content != "" {
+			events <- StreamEvent{DeltaContent: resp.Content}
+		}
+		for _, call := range resp.ToolCalls {
+			toolCall := call
+			events <- StreamEvent{ToolCall: &toolCall}
+		}
+		events <- StreamEvent{Done: true}
+	}()
 	return events, errs
 }
 

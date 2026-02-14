@@ -15,6 +15,11 @@ type Adapter interface {
 	Send(ctx context.Context, msg agent.OutboundMessage) error
 }
 
+type StreamingAdapter interface {
+	Adapter
+	SendStream(ctx context.Context, stream agent.OutboundStream) error
+}
+
 type Registry struct {
 	adapters map[string]Adapter
 	log      *log.Logger
@@ -70,6 +75,42 @@ func (r *Registry) Send(ctx context.Context, msg agent.OutboundMessage) error {
 		return fmt.Errorf("channel %q is not configured", id)
 	}
 	return adapter.Send(ctx, msg)
+}
+
+func (r *Registry) SendStream(ctx context.Context, stream agent.OutboundStream) error {
+	if r == nil {
+		return fmt.Errorf("channel registry is nil")
+	}
+	id := strings.ToLower(strings.TrimSpace(stream.Channel))
+	adapter, ok := r.adapters[id]
+	if !ok {
+		return fmt.Errorf("channel %q is not configured", id)
+	}
+	if streamingAdapter, ok := adapter.(StreamingAdapter); ok {
+		return streamingAdapter.SendStream(ctx, stream)
+	}
+	finalContent := ""
+	if len(stream.Events) > 0 {
+		for _, event := range stream.Events {
+			if strings.TrimSpace(event.Content) != "" {
+				finalContent = event.Content
+				break
+			}
+			if strings.TrimSpace(event.Delta) != "" {
+				finalContent += event.Delta
+			}
+		}
+	}
+	if strings.TrimSpace(finalContent) == "" {
+		return nil
+	}
+	return adapter.Send(ctx, agent.OutboundMessage{
+		Channel:  stream.Channel,
+		ChatID:   stream.ChatID,
+		ReplyTo:  stream.ReplyTo,
+		Content:  finalContent,
+		Metadata: stream.Metadata,
+	})
 }
 
 func (r *Registry) IDs() []string {
