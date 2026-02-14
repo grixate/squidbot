@@ -55,27 +55,27 @@ type KanbanBoard struct {
 }
 
 type CreateTaskInput struct {
-	Title       string              `json:"title"`
-	Description string              `json:"description"`
-	ColumnID    string              `json:"columnId"`
-	Priority    string              `json:"priority"`
-	Assignee    string              `json:"assignee"`
-	Notes       string              `json:"notes"`
-	DueAt       *time.Time          `json:"dueAt,omitempty"`
-	Source      mission.TaskSource  `json:"source"`
-	Dedupe      bool                `json:"dedupe"`
-	Metadata    map[string]any      `json:"metadata,omitempty"`
+	Title       string             `json:"title"`
+	Description string             `json:"description"`
+	ColumnID    string             `json:"columnId"`
+	Priority    string             `json:"priority"`
+	Assignee    string             `json:"assignee"`
+	Notes       string             `json:"notes"`
+	DueAt       *time.Time         `json:"dueAt,omitempty"`
+	Source      mission.TaskSource `json:"source"`
+	Dedupe      bool               `json:"dedupe"`
+	Metadata    map[string]any     `json:"metadata,omitempty"`
 }
 
 type UpdateTaskInput struct {
-	Title       *string     `json:"title,omitempty"`
-	Description *string     `json:"description,omitempty"`
-	ColumnID    *string     `json:"columnId,omitempty"`
-	Priority    *string     `json:"priority,omitempty"`
-	Assignee    *string     `json:"assignee,omitempty"`
-	Notes       *string     `json:"notes,omitempty"`
-	DueAt       *time.Time  `json:"dueAt,omitempty"`
-	ClearDueAt  bool        `json:"clearDueAt,omitempty"`
+	Title       *string    `json:"title,omitempty"`
+	Description *string    `json:"description,omitempty"`
+	ColumnID    *string    `json:"columnId,omitempty"`
+	Priority    *string    `json:"priority,omitempty"`
+	Assignee    *string    `json:"assignee,omitempty"`
+	Notes       *string    `json:"notes,omitempty"`
+	DueAt       *time.Time `json:"dueAt,omitempty"`
+	ClearDueAt  bool       `json:"clearDueAt,omitempty"`
 }
 
 type ConfigSnapshot struct {
@@ -90,6 +90,15 @@ type ConfigSnapshot struct {
 		} `json:"items"`
 	} `json:"providers"`
 	Channels struct {
+		Items map[string]struct {
+			ID        string   `json:"id"`
+			Label     string   `json:"label"`
+			Kind      string   `json:"kind"`
+			Enabled   bool     `json:"enabled"`
+			TokenSet  bool     `json:"tokenSet"`
+			AllowFrom []string `json:"allowFrom,omitempty"`
+			Endpoint  string   `json:"endpoint,omitempty"`
+		} `json:"items"`
 		Telegram struct {
 			Enabled   bool     `json:"enabled"`
 			TokenSet  bool     `json:"tokenSet"`
@@ -823,6 +832,36 @@ func (s *MissionControlService) Settings() ConfigSnapshot {
 		}
 		out.Providers.Items = append(out.Providers.Items, item)
 	}
+	out.Channels.Items = map[string]struct {
+		ID        string   `json:"id"`
+		Label     string   `json:"label"`
+		Kind      string   `json:"kind"`
+		Enabled   bool     `json:"enabled"`
+		TokenSet  bool     `json:"tokenSet"`
+		AllowFrom []string `json:"allowFrom,omitempty"`
+		Endpoint  string   `json:"endpoint,omitempty"`
+	}{}
+	for _, channelID := range config.SupportedChannels() {
+		profile, _ := config.ChannelProfile(channelID)
+		current := cfg.Channels.Registry[channelID]
+		out.Channels.Items[channelID] = struct {
+			ID        string   `json:"id"`
+			Label     string   `json:"label"`
+			Kind      string   `json:"kind"`
+			Enabled   bool     `json:"enabled"`
+			TokenSet  bool     `json:"tokenSet"`
+			AllowFrom []string `json:"allowFrom,omitempty"`
+			Endpoint  string   `json:"endpoint,omitempty"`
+		}{
+			ID:        channelID,
+			Label:     profile.Label,
+			Kind:      profile.Kind,
+			Enabled:   current.Enabled,
+			TokenSet:  strings.TrimSpace(current.Token) != "",
+			AllowFrom: current.AllowFrom,
+			Endpoint:  current.Endpoint,
+		}
+	}
 	out.Channels.Telegram.Enabled = cfg.Channels.Telegram.Enabled
 	out.Channels.Telegram.TokenSet = strings.TrimSpace(cfg.Channels.Telegram.Token) != ""
 	out.Channels.Telegram.AllowFrom = cfg.Channels.Telegram.AllowFrom
@@ -884,6 +923,35 @@ func (s *MissionControlService) UpdateTelegram(ctx context.Context, telegram con
 		Provider:       activeProvider,
 		ProviderConfig: activeCfg,
 		Telegram:       telegram,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err := s.saveConfig(next); err != nil {
+		return nil, err
+	}
+	return map[string]any{"ok": true, "restartRequired": true}, nil
+}
+
+func (s *MissionControlService) UpdateChannel(ctx context.Context, channelID string, channel config.GenericChannelConfig) (map[string]any, error) {
+	_ = ctx
+	channelID = strings.TrimSpace(strings.ToLower(channelID))
+	if channelID == "" {
+		return nil, fmt.Errorf("channel id is required")
+	}
+	cfg := s.getConfig()
+	activeProvider := cfg.Providers.Active
+	activeCfg, _ := cfg.ProviderByName(activeProvider)
+	channels := map[string]config.GenericChannelConfig{}
+	for id, current := range cfg.Channels.Registry {
+		channels[id] = current
+	}
+	channels[channelID] = channel
+	next, err := config.ApplyOnboardingInput(cfg, config.OnboardingInput{
+		Provider:       activeProvider,
+		ProviderConfig: activeCfg,
+		Telegram:       cfg.Channels.Telegram,
+		Channels:       channels,
 	})
 	if err != nil {
 		return nil, err

@@ -431,10 +431,50 @@ func (s *Server) handleManageSettingsTelegram(w http.ResponseWriter, r *http.Req
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	out, err := s.mission.UpdateTelegram(r.Context(), config.TelegramConfig{
+	telegram := config.TelegramConfig{
 		Enabled:   req.Enabled,
 		Token:     strings.TrimSpace(req.Token),
 		AllowFrom: req.AllowFrom,
+	}
+	out, err := s.mission.UpdateTelegram(r.Context(), telegram)
+	if err != nil {
+		writeManageError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleManageSettingsChannel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	channelID := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/api/manage/settings/channels/"))
+	if channelID == "" {
+		http.Error(w, "channel id required", http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		Enabled   bool              `json:"enabled"`
+		Token     string            `json:"token"`
+		AllowFrom []string          `json:"allowFrom"`
+		Endpoint  string            `json:"endpoint"`
+		AuthToken string            `json:"authToken"`
+		Headers   map[string]string `json:"headers"`
+		Metadata  map[string]string `json:"metadata"`
+	}
+	if err := readJSON(r.Body, &req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	out, err := s.mission.UpdateChannel(r.Context(), channelID, config.GenericChannelConfig{
+		Enabled:   req.Enabled,
+		Token:     strings.TrimSpace(req.Token),
+		AllowFrom: req.AllowFrom,
+		Endpoint:  strings.TrimSpace(req.Endpoint),
+		AuthToken: strings.TrimSpace(req.AuthToken),
+		Headers:   req.Headers,
+		Metadata:  req.Metadata,
 	})
 	if err != nil {
 		writeManageError(w, err)

@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+
+	"github.com/grixate/squidbot/internal/catalog"
 )
 
 type OnboardingOptions struct {
@@ -24,6 +26,9 @@ type OnboardingOptions struct {
 	TelegramToken        string
 	TelegramAllowFromSet bool
 	TelegramAllowFrom    []string
+	ChannelEnabledIDs    []string
+	ChannelEndpoints     []string
+	ChannelAuthTokens    []string
 
 	In  io.Reader
 	Out io.Writer
@@ -136,8 +141,7 @@ func applyExplicitOnboardingOverrides(providerCfg ProviderConfig, opts Onboardin
 }
 
 func fillOnboardingProviderConfig(providerName string, providerCfg *ProviderConfig, opts OnboardingOptions, reader *bufio.Reader, out io.Writer) error {
-	requiredAPIKey := providerName == ProviderOpenRouter || providerName == ProviderAnthropic || providerName == ProviderOpenAI || providerName == ProviderGemini
-	requiredModel := providerName == ProviderOllama || providerName == ProviderLMStudio
+	requiredAPIKey, requiredModel, _ := ProviderRequirements(providerName)
 
 	if opts.NonInteractive {
 		if requiredAPIKey && strings.TrimSpace(providerCfg.APIKey) == "" {
@@ -204,6 +208,8 @@ func fillOnboardingProviderConfig(providerName string, providerCfg *ProviderConf
 func fillOnboardingTelegramConfig(cfg *Config, opts OnboardingOptions, reader *bufio.Reader, out io.Writer) error {
 	if opts.NonInteractive {
 		applyExplicitTelegramOnboardingOverrides(cfg, opts)
+		applyExplicitChannelOverrides(cfg, opts)
+		migrateLegacyChannels(cfg)
 		return nil
 	}
 
@@ -242,6 +248,7 @@ func fillOnboardingTelegramConfig(cfg *Config, opts OnboardingOptions, reader *b
 	cfg.Channels.Telegram.Enabled = true
 	cfg.Channels.Telegram.Token = strings.TrimSpace(token)
 	cfg.Channels.Telegram.AllowFrom = normalizeAllowFrom([]string{allowListInput})
+	migrateLegacyChannels(cfg)
 	return nil
 }
 
@@ -255,11 +262,55 @@ func applyExplicitTelegramOnboardingOverrides(cfg *Config, opts OnboardingOption
 	if opts.TelegramAllowFromSet {
 		cfg.Channels.Telegram.AllowFrom = normalizeAllowFrom(opts.TelegramAllowFrom)
 	}
+	migrateLegacyChannels(cfg)
+}
+
+func applyExplicitChannelOverrides(cfg *Config, opts OnboardingOptions) {
+	if cfg.Channels.Registry == nil {
+		cfg.Channels.Registry = map[string]GenericChannelConfig{}
+	}
+	for _, raw := range opts.ChannelEnabledIDs {
+		id := strings.ToLower(strings.TrimSpace(raw))
+		if id == "" {
+			continue
+		}
+		current := cfg.Channels.Registry[id]
+		current.Enabled = true
+		cfg.Channels.Registry[id] = current
+	}
+	for _, raw := range opts.ChannelEndpoints {
+		id, value, ok := splitKV(raw)
+		if !ok {
+			continue
+		}
+		current := cfg.Channels.Registry[id]
+		current.Endpoint = value
+		cfg.Channels.Registry[id] = current
+	}
+	for _, raw := range opts.ChannelAuthTokens {
+		id, value, ok := splitKV(raw)
+		if !ok {
+			continue
+		}
+		current := cfg.Channels.Registry[id]
+		current.AuthToken = value
+		cfg.Channels.Registry[id] = current
+	}
 }
 
 func validateTelegramOnboarding(cfg Config) error {
-	if cfg.Channels.Telegram.Enabled && strings.TrimSpace(cfg.Channels.Telegram.Token) == "" {
-		return fmt.Errorf("telegram enabled requires token")
+	migrateLegacyChannels(&cfg)
+	for channelID, channel := range cfg.Channels.Registry {
+		if !channel.Enabled {
+			continue
+		}
+		if channelID == "telegram" && strings.TrimSpace(channel.Token) == "" {
+			return fmt.Errorf("telegram enabled requires token")
+		}
+		profile, ok := ChannelProfile(channelID)
+		if ok && profile.Kind == "plugin" && strings.TrimSpace(channel.Endpoint) == "" {
+			return fmt.Errorf("channel %q requires endpoint", channelID)
+		}
 	}
 	return nil
 }
@@ -331,13 +382,33 @@ func promptProviderSelection(reader *bufio.Reader, out io.Writer) (string, error
 		Name  string
 		Label string
 	}
-	items := []item{
-		{Name: ProviderOpenRouter, Label: "OpenRouter"},
-		{Name: ProviderAnthropic, Label: "Anthropic"},
-		{Name: ProviderOpenAI, Label: "OpenAI"},
-		{Name: ProviderGemini, Label: "Gemini"},
-		{Name: ProviderOllama, Label: "Ollama"},
-		{Name: ProviderLMStudio, Label: "LM Studio"},
+	preferredOrder := []string{
+		ProviderOpenRouter,
+		ProviderAnthropic,
+		ProviderOpenAI,
+		ProviderGemini,
+		ProviderOllama,
+		ProviderLMStudio,
+	}
+	seen := map[string]struct{}{}
+	providers := make([]string, 0, len(SupportedProviders()))
+	for _, providerID := range preferredOrder {
+		if _, ok := seen[providerID]; ok {
+			continue
+		}
+		seen[providerID] = struct{}{}
+		providers = append(providers, providerID)
+	}
+	for _, providerID := range SupportedProviders() {
+		if _, ok := seen[providerID]; ok {
+			continue
+		}
+		seen[providerID] = struct{}{}
+		providers = append(providers, providerID)
+	}
+	items := make([]item, 0, len(providers))
+	for _, providerID := range providers {
+		items = append(items, item{Name: providerID, Label: providerLabel(providerID)})
 	}
 	fmt.Fprintln(out, "Choose a provider:")
 	for idx, it := range items {
@@ -441,6 +512,9 @@ func promptYesNo(reader *bufio.Reader, out io.Writer, label string, defaultYes b
 }
 
 func providerLabel(providerName string) string {
+	if profile, ok := catalog.ProviderByID(providerName); ok {
+		return profile.Label
+	}
 	switch providerName {
 	case ProviderOpenRouter:
 		return "OpenRouter"
@@ -485,6 +559,19 @@ func normalizeAllowFrom(values []string) []string {
 		}
 	}
 	return out
+}
+
+func splitKV(value string) (string, string, bool) {
+	parts := strings.SplitN(value, "=", 2)
+	if len(parts) != 2 {
+		return "", "", false
+	}
+	id := strings.ToLower(strings.TrimSpace(parts[0]))
+	val := strings.TrimSpace(parts[1])
+	if id == "" || val == "" {
+		return "", "", false
+	}
+	return id, val, true
 }
 
 func readerOrStdin(in io.Reader) io.Reader {

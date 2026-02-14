@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/grixate/squidbot/internal/catalog"
 	"github.com/grixate/squidbot/internal/config"
 	"github.com/grixate/squidbot/internal/provider"
 	"github.com/grixate/squidbot/internal/telemetry"
@@ -252,7 +253,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/api/manage/settings", s.withManageAuth(s.handleManageSettings))
 	mux.HandleFunc("/api/manage/settings/provider/test", s.withManageAuth(s.handleManageSettingsProviderTest))
 	mux.HandleFunc("/api/manage/settings/provider", s.withManageAuth(s.handleManageSettingsProvider))
-	mux.HandleFunc("/api/manage/settings/channels/telegram", s.withManageAuth(s.handleManageSettingsTelegram))
+	mux.HandleFunc("/api/manage/settings/channels/", s.withManageAuth(s.handleManageSettingsChannel))
 	mux.HandleFunc("/api/manage/settings/runtime", s.withManageAuth(s.handleManageSettingsRuntime))
 	mux.HandleFunc("/api/manage/settings/password", s.withManageAuth(s.handleManageSettingsPassword))
 
@@ -297,14 +298,39 @@ func (s *Server) handleSetupState(w http.ResponseWriter, r *http.Request) {
 
 	currentProvider := strings.TrimSpace(cfg.Providers.Active)
 	currentProviderCfg, _ := cfg.ProviderByName(currentProvider)
+	channels := make([]map[string]any, 0, len(config.SupportedChannels()))
+	currentChannels := map[string]any{}
+	for _, channelID := range config.SupportedChannels() {
+		profile, _ := config.ChannelProfile(channelID)
+		channels = append(channels, map[string]any{
+			"id":    channelID,
+			"label": profile.Label,
+			"kind":  profile.Kind,
+		})
+		current := cfg.Channels.Registry[channelID]
+		currentChannels[channelID] = map[string]any{
+			"enabled":   current.Enabled,
+			"tokenSet":  strings.TrimSpace(current.Token) != "",
+			"allowFrom": current.AllowFrom,
+			"endpoint":  current.Endpoint,
+			"authSet":   strings.TrimSpace(current.AuthToken) != "",
+		}
+	}
+	if _, ok := currentChannels["telegram"]; !ok {
+		currentChannels["telegram"] = map[string]any{
+			"enabled":   cfg.Channels.Telegram.Enabled,
+			"tokenSet":  strings.TrimSpace(cfg.Channels.Telegram.Token) != "",
+			"allowFrom": cfg.Channels.Telegram.AllowFrom,
+			"endpoint":  "",
+			"authSet":   false,
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"setupComplete":       setupComplete,
 		"requiresSetupToken":  tokenRequired,
 		"setupTokenExpiresAt": tokenUntil.Format(time.RFC3339),
 		"providers":           providers,
-		"channels": []map[string]any{
-			{"id": "telegram", "label": "Telegram"},
-		},
+		"channels":            channels,
 		"current": map[string]any{
 			"provider": map[string]any{
 				"id":        currentProvider,
@@ -312,14 +338,7 @@ func (s *Server) handleSetupState(w http.ResponseWriter, r *http.Request) {
 				"model":     currentProviderCfg.Model,
 				"hasApiKey": strings.TrimSpace(currentProviderCfg.APIKey) != "",
 			},
-			"channels": map[string]any{
-				"telegram": map[string]any{
-					"enabled":      cfg.Channels.Telegram.Enabled,
-					"tokenSet":     strings.TrimSpace(cfg.Channels.Telegram.Token) != "",
-					"allowFrom":    cfg.Channels.Telegram.AllowFrom,
-					"tokenPreview": "",
-				},
-			},
+			"channels": currentChannels,
 		},
 	})
 }
@@ -380,7 +399,19 @@ func (s *Server) handleSetupComplete(w http.ResponseWriter, r *http.Request) {
 			Enabled   bool     `json:"enabled"`
 			Token     string   `json:"token"`
 			AllowFrom []string `json:"allowFrom"`
+			Endpoint  string   `json:"endpoint"`
+			AuthToken string   `json:"authToken"`
 		} `json:"channel"`
+		Channels []struct {
+			ID        string            `json:"id"`
+			Enabled   bool              `json:"enabled"`
+			Token     string            `json:"token"`
+			AllowFrom []string          `json:"allowFrom"`
+			Endpoint  string            `json:"endpoint"`
+			AuthToken string            `json:"authToken"`
+			Headers   map[string]string `json:"headers"`
+			Metadata  map[string]string `json:"metadata"`
+		} `json:"channels"`
 		Password string `json:"password"`
 	}
 	if err := readJSON(r.Body, &req); err != nil {
@@ -396,10 +427,6 @@ func (s *Server) handleSetupComplete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("password must be at least %d characters", s.passwordMinLength), http.StatusBadRequest)
 		return
 	}
-	if req.Channel.ID != "" && req.Channel.ID != "telegram" {
-		http.Error(w, "unsupported channel", http.StatusBadRequest)
-		return
-	}
 	nextPasswordHash, err := HashPassword(password)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -410,6 +437,42 @@ func (s *Server) handleSetupComplete(w http.ResponseWriter, r *http.Request) {
 	cfg := s.cfg
 	s.mu.Unlock()
 
+	channelConfigs := map[string]config.GenericChannelConfig{}
+	for _, channel := range req.Channels {
+		channelID := strings.ToLower(strings.TrimSpace(channel.ID))
+		if channelID == "" {
+			continue
+		}
+		channelConfigs[channelID] = config.GenericChannelConfig{
+			Enabled:   channel.Enabled,
+			Token:     strings.TrimSpace(channel.Token),
+			AllowFrom: channel.AllowFrom,
+			Endpoint:  strings.TrimSpace(channel.Endpoint),
+			AuthToken: strings.TrimSpace(channel.AuthToken),
+			Headers:   channel.Headers,
+			Metadata:  channel.Metadata,
+		}
+	}
+	legacyChannelID := strings.ToLower(strings.TrimSpace(req.Channel.ID))
+	if legacyChannelID == "" {
+		legacyChannelID = "telegram"
+	}
+	if len(channelConfigs) == 0 {
+		channelConfigs[legacyChannelID] = config.GenericChannelConfig{
+			Enabled:   req.Channel.Enabled,
+			Token:     strings.TrimSpace(req.Channel.Token),
+			AllowFrom: req.Channel.AllowFrom,
+			Endpoint:  strings.TrimSpace(req.Channel.Endpoint),
+			AuthToken: strings.TrimSpace(req.Channel.AuthToken),
+		}
+	}
+	telegramChannel := channelConfigs["telegram"]
+	telegramCfg := config.TelegramConfig{
+		Enabled:   telegramChannel.Enabled,
+		Token:     strings.TrimSpace(telegramChannel.Token),
+		AllowFrom: telegramChannel.AllowFrom,
+	}
+
 	nextCfg, err := config.ApplyOnboardingInput(cfg, config.OnboardingInput{
 		Provider: req.Provider,
 		ProviderConfig: config.ProviderConfig{
@@ -417,11 +480,8 @@ func (s *Server) handleSetupComplete(w http.ResponseWriter, r *http.Request) {
 			APIBase: strings.TrimSpace(req.APIBase),
 			Model:   strings.TrimSpace(req.Model),
 		},
-		Telegram: config.TelegramConfig{
-			Enabled:   req.Channel.Enabled,
-			Token:     strings.TrimSpace(req.Channel.Token),
-			AllowFrom: req.Channel.AllowFrom,
-		},
+		Telegram: telegramCfg,
+		Channels: channelConfigs,
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -672,22 +732,10 @@ func (s *Server) sessionFromRequest(r *http.Request) (sessionRecord, bool) {
 }
 
 func providerLabel(name string) string {
-	switch name {
-	case config.ProviderOpenRouter:
-		return "OpenRouter"
-	case config.ProviderAnthropic:
-		return "Anthropic"
-	case config.ProviderOpenAI:
-		return "OpenAI"
-	case config.ProviderGemini:
-		return "Gemini"
-	case config.ProviderOllama:
-		return "Ollama"
-	case config.ProviderLMStudio:
-		return "LM Studio"
-	default:
-		return name
+	if profile, ok := catalog.ProviderByID(name); ok {
+		return profile.Label
 	}
+	return name
 }
 
 func withJSON(next http.Handler) http.Handler {

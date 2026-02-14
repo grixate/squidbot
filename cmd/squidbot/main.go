@@ -105,6 +105,9 @@ func onboardCmd(configPath string) *cobra.Command {
 	var telegramEnabled bool
 	var telegramToken string
 	var telegramAllowFrom []string
+	var channelEnabledIDs []string
+	var channelEndpoints []string
+	var channelAuthTokens []string
 
 	cmd := &cobra.Command{
 		Use:   "onboard",
@@ -137,6 +140,9 @@ func onboardCmd(configPath string) *cobra.Command {
 				TelegramToken:        telegramToken,
 				TelegramAllowFromSet: cmd.Flags().Changed("telegram-allow-from"),
 				TelegramAllowFrom:    telegramAllowFrom,
+				ChannelEnabledIDs:    channelEnabledIDs,
+				ChannelEndpoints:     channelEndpoints,
+				ChannelAuthTokens:    channelAuthTokens,
 				In:                   cmd.InOrStdin(),
 				Out:                  cmd.OutOrStdout(),
 			})
@@ -162,7 +168,7 @@ func onboardCmd(configPath string) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&providerName, "provider", "", "Provider id (openrouter|anthropic|openai|gemini|ollama|lmstudio)")
+	cmd.Flags().StringVar(&providerName, "provider", "", "Provider id")
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "Provider API key")
 	cmd.Flags().StringVar(&apiBase, "api-base", "", "Provider API base URL")
 	cmd.Flags().StringVar(&model, "model", "", "Provider model")
@@ -172,6 +178,9 @@ func onboardCmd(configPath string) *cobra.Command {
 	cmd.Flags().BoolVar(&telegramEnabled, "telegram-enabled", false, "Enable Telegram channel")
 	cmd.Flags().StringVar(&telegramToken, "telegram-token", "", "Telegram bot token")
 	cmd.Flags().StringSliceVar(&telegramAllowFrom, "telegram-allow-from", nil, "Telegram allow list entry (repeatable or comma-separated)")
+	cmd.Flags().StringSliceVar(&channelEnabledIDs, "channel-enable", nil, "Enable channel id (repeatable)")
+	cmd.Flags().StringSliceVar(&channelEndpoints, "channel-endpoint", nil, "Channel endpoint in id=url form (repeatable)")
+	cmd.Flags().StringSliceVar(&channelAuthTokens, "channel-auth-token", nil, "Channel auth token in id=token form (repeatable)")
 	return cmd
 }
 
@@ -316,7 +325,7 @@ func gatewayCmd(configPath string, logger *log.Logger) *cobra.Command {
 						Metrics:   runtime.Metrics,
 						Heartbeat: runtime.Heartbeat,
 					},
-					Logger:            logger,
+					Logger: logger,
 				})
 				if buildErr != nil {
 					return buildErr

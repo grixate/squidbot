@@ -15,6 +15,9 @@
     defaultModel?: string;
   };
 
+  type ChannelInfo = { id: string; label: string; kind?: string };
+  type ChannelState = { enabled?: boolean; allowFrom?: string[]; endpoint?: string };
+
   let stage: Stage = 'loading';
   let stateNote = 'Loading setup state...';
   let error = '';
@@ -27,10 +30,8 @@
   let model = '';
   let password = '';
   let providerTestResult = '';
-
-  let telegramEnabled = false;
-  let telegramToken = '';
-  let telegramAllow = '';
+  let channels: ChannelInfo[] = [];
+  let channelStates: Record<string, { enabled: boolean; token: string; allow: string; endpoint: string; authToken: string }> = {};
 
   let loginPassword = '';
 
@@ -56,9 +57,10 @@
     const setupState = await fetchJSON<{
       setupComplete: boolean;
       providers: ProviderInfo[];
+      channels?: ChannelInfo[];
       current?: {
         provider?: { id?: string; apiBase?: string; model?: string };
-        channels?: { telegram?: { enabled?: boolean; allowFrom?: string[] } };
+        channels?: Record<string, ChannelState>;
       };
     }>('/api/setup/state');
 
@@ -66,8 +68,21 @@
     provider = setupState.current?.provider?.id || providers[0]?.id || '';
     apiBase = setupState.current?.provider?.apiBase || '';
     model = setupState.current?.provider?.model || '';
-    telegramEnabled = !!setupState.current?.channels?.telegram?.enabled;
-    telegramAllow = (setupState.current?.channels?.telegram?.allowFrom || []).join(',');
+    channels = setupState.channels || [];
+    channelStates = {};
+    for (const channel of channels) {
+      const current = setupState.current?.channels?.[channel.id] || {};
+      channelStates[channel.id] = {
+        enabled: !!current.enabled,
+        token: '',
+        allow: (current.allowFrom || []).join(','),
+        endpoint: current.endpoint || '',
+        authToken: ''
+      };
+    }
+    if (!channelStates.telegram) {
+      channelStates.telegram = { enabled: false, token: '', allow: '', endpoint: '', authToken: '' };
+    }
     updateProviderDefaults();
 
     if (!setupState.setupComplete) {
@@ -119,11 +134,22 @@
           apiKey,
           apiBase,
           model,
+          channels: Object.entries(channelStates).map(([id, channel]) => ({
+            id,
+            enabled: channel.enabled,
+            token: channel.token,
+            allowFrom: channel.allow
+              .split(',')
+              .map((value) => value.trim())
+              .filter((value) => value.length > 0),
+            endpoint: channel.endpoint,
+            authToken: channel.authToken
+          })),
           channel: {
             id: 'telegram',
-            enabled: telegramEnabled,
-            token: telegramToken,
-            allowFrom: telegramAllow
+            enabled: channelStates.telegram?.enabled || false,
+            token: channelStates.telegram?.token || '',
+            allowFrom: (channelStates.telegram?.allow || '')
               .split(',')
               .map((value) => value.trim())
               .filter((value) => value.length > 0)
@@ -206,16 +232,50 @@
       </div>
 
       <hr />
-      <label class="checkbox" for="telegram-enabled">
-        <input id="telegram-enabled" name="telegram_enabled" bind:checked={telegramEnabled} type="checkbox" />
-        Enable Telegram Channel
-      </label>
-
-      <label for="telegram-token">Telegram Token</label>
-      <input id="telegram-token" name="telegram_token" bind:value={telegramToken} type="password" autocomplete="off" />
-
-      <label for="telegram-allow">Telegram Allow List</label>
-      <input id="telegram-allow" name="telegram_allow" bind:value={telegramAllow} type="text" autocomplete="off" />
+      {#each channels as channel}
+        <h3>{channel.label}</h3>
+        <label class="checkbox" for={`channel-enabled-${channel.id}`}>
+          <input
+            id={`channel-enabled-${channel.id}`}
+            name={`channel_enabled_${channel.id}`}
+            bind:checked={channelStates[channel.id].enabled}
+            type="checkbox"
+          />
+          Enable {channel.label}
+        </label>
+        <label for={`channel-token-${channel.id}`}>Token</label>
+        <input
+          id={`channel-token-${channel.id}`}
+          name={`channel_token_${channel.id}`}
+          bind:value={channelStates[channel.id].token}
+          type="password"
+          autocomplete="off"
+        />
+        <label for={`channel-allow-${channel.id}`}>Allow List</label>
+        <input
+          id={`channel-allow-${channel.id}`}
+          name={`channel_allow_${channel.id}`}
+          bind:value={channelStates[channel.id].allow}
+          type="text"
+          autocomplete="off"
+        />
+        <label for={`channel-endpoint-${channel.id}`}>Endpoint</label>
+        <input
+          id={`channel-endpoint-${channel.id}`}
+          name={`channel_endpoint_${channel.id}`}
+          bind:value={channelStates[channel.id].endpoint}
+          type="text"
+          autocomplete="off"
+        />
+        <label for={`channel-auth-${channel.id}`}>Auth Token</label>
+        <input
+          id={`channel-auth-${channel.id}`}
+          name={`channel_auth_${channel.id}`}
+          bind:value={channelStates[channel.id].authToken}
+          type="password"
+          autocomplete="off"
+        />
+      {/each}
 
       <hr />
       <label for="password">Management Password (min 12 chars)</label>

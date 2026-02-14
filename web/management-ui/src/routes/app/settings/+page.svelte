@@ -11,9 +11,19 @@
     hasApiKey: boolean;
   };
 
+  type ChannelItem = {
+    id: string;
+    label: string;
+    kind: string;
+    enabled: boolean;
+    tokenSet: boolean;
+    allowFrom?: string[];
+    endpoint?: string;
+  };
+
   type Settings = {
     providers: { active: string; items: ProviderItem[] };
-    channels: { telegram: { enabled: boolean; tokenSet: boolean; allowFrom: string[] } };
+    channels: { telegram: { enabled: boolean; tokenSet: boolean; allowFrom: string[] }; items?: Record<string, ChannelItem> };
     runtime: { heartbeatIntervalSec: number; mailboxSize: number };
     management: { host: string; port: number; publicBaseUrl: string; serveInGateway: boolean };
   };
@@ -30,9 +40,13 @@
   let providerModel = '';
   let providerTest = '';
 
-  let telegramEnabled = false;
-  let telegramToken = '';
-  let telegramAllow = '';
+  let channelItems: ChannelItem[] = [];
+  let selectedChannelID = 'telegram';
+  let channelEnabled = false;
+  let channelToken = '';
+  let channelAllow = '';
+  let channelEndpoint = '';
+  let channelAuthToken = '';
 
   let heartbeatIntervalSec = 1800;
   let mailboxSize = 64;
@@ -56,8 +70,21 @@
       settings = await fetchJSON<Settings>('/api/manage/settings');
       provider = settings.providers.active || settings.providers.items[0]?.id || '';
       resetProviderFields();
-      telegramEnabled = settings.channels.telegram.enabled;
-      telegramAllow = (settings.channels.telegram.allowFrom || []).join(',');
+      channelItems = Object.values(settings.channels.items || {});
+      if (channelItems.length === 0) {
+        channelItems = [
+          {
+            id: 'telegram',
+            label: 'Telegram',
+            kind: 'core',
+            enabled: settings.channels.telegram.enabled,
+            tokenSet: settings.channels.telegram.tokenSet,
+            allowFrom: settings.channels.telegram.allowFrom || []
+          }
+        ];
+      }
+      selectedChannelID = channelItems.find((entry) => entry.id === 'telegram')?.id || channelItems[0]?.id || 'telegram';
+      hydrateChannelSelection();
       heartbeatIntervalSec = settings.runtime.heartbeatIntervalSec || 1800;
       mailboxSize = settings.runtime.mailboxSize || 64;
     } catch (err) {
@@ -115,24 +142,37 @@
     }
   }
 
-  async function saveTelegram() {
+  function hydrateChannelSelection() {
+    const selected = channelItems.find((entry) => entry.id === selectedChannelID);
+    if (!selected) return;
+    channelEnabled = !!selected.enabled;
+    channelToken = '';
+    channelAllow = (selected.allowFrom || []).join(',');
+    channelEndpoint = selected.endpoint || '';
+    channelAuthToken = '';
+  }
+
+  async function saveChannel() {
     error = '';
     success = '';
     try {
-      await fetchJSON('/api/manage/settings/channels/telegram', {
+      await fetchJSON(`/api/manage/settings/channels/${selectedChannelID}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          enabled: telegramEnabled,
-          token: telegramToken,
-          allowFrom: telegramAllow
+          enabled: channelEnabled,
+          token: channelToken,
+          allowFrom: channelAllow
             .split(',')
             .map((value) => value.trim())
-            .filter((value) => value.length > 0)
+            .filter((value) => value.length > 0),
+          endpoint: channelEndpoint,
+          authToken: channelAuthToken
         })
       });
-      success = 'Telegram settings saved.';
-      telegramToken = '';
+      success = `Channel settings saved for ${selectedChannelID}.`;
+      channelToken = '';
+      channelAuthToken = '';
       await loadData();
     } catch (err) {
       error = parseError(err);
@@ -219,16 +259,33 @@
       </section>
 
       <section class="panel">
-        <h3>Telegram Channel</h3>
-        <label class="checkbox" for="telegram-enabled">
-          <input id="telegram-enabled" name="telegram_enabled" bind:checked={telegramEnabled} type="checkbox" />
-          Enable Telegram
+        <h3>Channel</h3>
+        <label for="channel-id">Channel</label>
+        <select
+          id="channel-id"
+          name="channel_id"
+          bind:value={selectedChannelID}
+          onchange={() => {
+            hydrateChannelSelection();
+          }}
+        >
+          {#each channelItems as item}
+            <option value={item.id}>{item.label} ({item.kind})</option>
+          {/each}
+        </select>
+        <label class="checkbox" for="channel-enabled">
+          <input id="channel-enabled" name="channel_enabled" bind:checked={channelEnabled} type="checkbox" />
+          Enable Channel
         </label>
-        <label for="telegram-token">Token</label>
-        <input id="telegram-token" name="telegram_token" bind:value={telegramToken} type="password" />
-        <label for="telegram-allow">Allow List (comma-separated)</label>
-        <input id="telegram-allow" name="telegram_allow" bind:value={telegramAllow} type="text" />
-        <Button.Root type="button" onclick={saveTelegram}>Save Telegram</Button.Root>
+        <label for="channel-token">Token</label>
+        <input id="channel-token" name="channel_token" bind:value={channelToken} type="password" />
+        <label for="channel-allow">Allow List (comma-separated)</label>
+        <input id="channel-allow" name="channel_allow" bind:value={channelAllow} type="text" />
+        <label for="channel-endpoint">Endpoint</label>
+        <input id="channel-endpoint" name="channel_endpoint" bind:value={channelEndpoint} type="text" />
+        <label for="channel-auth">Auth Token</label>
+        <input id="channel-auth" name="channel_auth" bind:value={channelAuthToken} type="password" />
+        <Button.Root type="button" onclick={saveChannel}>Save Channel</Button.Root>
       </section>
     </div>
 

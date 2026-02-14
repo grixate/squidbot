@@ -11,19 +11,32 @@ import (
 )
 
 type OpenAICompatProvider struct {
-	apiKey  string
-	baseURL string
-	client  *http.Client
+	apiKey       string
+	baseURL      string
+	apiKeyHeader string
+	apiKeyPrefix string
+	headers      map[string]string
+	client       *http.Client
 }
 
 func NewOpenAICompatProvider(apiKey, baseURL string) *OpenAICompatProvider {
+	return NewOpenAICompatProviderWithOptions(apiKey, baseURL, "Authorization", "Bearer ", nil)
+}
+
+func NewOpenAICompatProviderWithOptions(apiKey, baseURL, apiKeyHeader, apiKeyPrefix string, headers map[string]string) *OpenAICompatProvider {
 	trimmed := strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	if trimmed == "" {
 		trimmed = "https://api.openai.com/v1"
 	}
+	if strings.TrimSpace(apiKeyHeader) == "" {
+		apiKeyHeader = "Authorization"
+	}
 	return &OpenAICompatProvider{
-		apiKey:  apiKey,
-		baseURL: trimmed,
+		apiKey:       apiKey,
+		baseURL:      trimmed,
+		apiKeyHeader: apiKeyHeader,
+		apiKeyPrefix: apiKeyPrefix,
+		headers:      cloneHeaders(headers),
 		client: &http.Client{
 			Timeout: 120 * time.Second,
 		},
@@ -65,7 +78,13 @@ func (p *OpenAICompatProvider) Chat(ctx context.Context, req ChatRequest) (ChatR
 		return ChatResponse{}, err
 	}
 	if strings.TrimSpace(p.apiKey) != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
+		httpReq.Header.Set(p.apiKeyHeader, p.apiKeyPrefix+p.apiKey)
+	}
+	for key, value := range p.headers {
+		if strings.TrimSpace(key) == "" || strings.TrimSpace(value) == "" {
+			continue
+		}
+		httpReq.Header.Set(key, value)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
@@ -149,6 +168,17 @@ func toOpenAITools(in []ToolDefinition) []map[string]any {
 				"parameters":  td.Schema,
 			},
 		})
+	}
+	return out
+}
+
+func cloneHeaders(headers map[string]string) map[string]string {
+	if len(headers) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(headers))
+	for key, value := range headers {
+		out[key] = value
 	}
 	return out
 }

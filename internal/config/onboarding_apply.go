@@ -9,6 +9,7 @@ type OnboardingInput struct {
 	Provider string
 	ProviderConfig
 	Telegram TelegramConfig
+	Channels map[string]GenericChannelConfig
 }
 
 func ApplyOnboardingInput(cfg Config, input OnboardingInput) (Config, error) {
@@ -30,11 +31,28 @@ func ApplyOnboardingInput(cfg Config, input OnboardingInput) (Config, error) {
 
 	cfg.Providers.Active = providerName
 	_ = cfg.SetProviderByName(providerName, providerCfg)
-	cfg.Channels.Telegram = TelegramConfig{
+	if cfg.Channels.Registry == nil {
+		cfg.Channels.Registry = map[string]GenericChannelConfig{}
+	}
+	if len(input.Channels) > 0 {
+		for id, channel := range input.Channels {
+			normalizedID := strings.ToLower(strings.TrimSpace(id))
+			if normalizedID == "" {
+				continue
+			}
+			channel.Token = strings.TrimSpace(channel.Token)
+			channel.AllowFrom = normalizeAllowFrom(channel.AllowFrom)
+			cfg.Channels.Registry[normalizedID] = channel
+		}
+	}
+	cfg.Channels.Registry["telegram"] = GenericChannelConfig{
+		Label:     "Telegram",
+		Kind:      "core",
 		Enabled:   input.Telegram.Enabled,
 		Token:     strings.TrimSpace(input.Telegram.Token),
 		AllowFrom: normalizeAllowFrom(input.Telegram.AllowFrom),
 	}
+	migrateLegacyChannels(&cfg)
 
 	if err := ValidateActiveProvider(cfg); err != nil {
 		return cfg, err

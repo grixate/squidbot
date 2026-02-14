@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/grixate/squidbot/internal/catalog"
 	"github.com/grixate/squidbot/internal/config"
 )
 
@@ -17,40 +18,25 @@ func FromConfig(cfg config.Config) (LLMProvider, string, error) {
 		model = p.Model
 	}
 
-	switch name {
-	case config.ProviderOpenRouter:
-		base := p.APIBase
-		if strings.TrimSpace(base) == "" {
-			base = config.ProviderDefaultAPIBase(config.ProviderOpenRouter)
+	profile, hasProfile := catalog.ProviderByID(name)
+	if !hasProfile {
+		profile = catalog.ProviderProfile{
+			ID:           name,
+			Transport:    "openai_compat",
+			APIKeyHeader: "Authorization",
+			APIKeyPrefix: "Bearer ",
 		}
-		return NewOpenAICompatProvider(p.APIKey, base), model, nil
-	case config.ProviderOpenAI:
-		base := p.APIBase
-		if strings.TrimSpace(base) == "" {
-			base = config.ProviderDefaultAPIBase(config.ProviderOpenAI)
-		}
-		return NewOpenAICompatProvider(p.APIKey, base), model, nil
-	case config.ProviderGemini:
-		base := p.APIBase
-		if strings.TrimSpace(base) == "" {
-			base = config.ProviderDefaultAPIBase(config.ProviderGemini)
-		}
-		return NewOpenAICompatProvider(p.APIKey, base), model, nil
-	case config.ProviderOllama:
-		base := p.APIBase
-		if strings.TrimSpace(base) == "" {
-			base = config.ProviderDefaultAPIBase(config.ProviderOllama)
-		}
-		return NewOpenAICompatProvider(p.APIKey, base), model, nil
-	case config.ProviderLMStudio:
-		base := p.APIBase
-		if strings.TrimSpace(base) == "" {
-			base = config.ProviderDefaultAPIBase(config.ProviderLMStudio)
-		}
-		return NewOpenAICompatProvider(p.APIKey, base), model, nil
-	case config.ProviderAnthropic:
+	}
+	switch strings.TrimSpace(profile.Transport) {
+	case "anthropic":
 		return NewAnthropicProvider(p.APIKey, model), model, nil
+	case "openai_compat", "":
+		base := p.APIBase
+		if strings.TrimSpace(base) == "" {
+			base = config.ProviderDefaultAPIBase(name)
+		}
+		return NewOpenAICompatProviderWithOptions(p.APIKey, base, profile.APIKeyHeader, profile.APIKeyPrefix, nil), model, nil
 	default:
-		return nil, "", fmt.Errorf("no provider configured")
+		return nil, "", fmt.Errorf("unsupported provider transport %q for %q", profile.Transport, name)
 	}
 }
