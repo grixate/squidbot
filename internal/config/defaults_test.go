@@ -54,6 +54,30 @@ func TestDefaultIncludesMemoryAndSkillsSettings(t *testing.T) {
 	if cfg.Runtime.Subagents.ReinjectCompletion {
 		t.Fatal("expected subagents.reinjectCompletion default false")
 	}
+	if !cfg.Runtime.TokenSafety.Enabled {
+		t.Fatal("expected tokenSafety.enabled default true")
+	}
+	if cfg.Runtime.TokenSafety.Mode != "hybrid" {
+		t.Fatalf("unexpected tokenSafety.mode default: %q", cfg.Runtime.TokenSafety.Mode)
+	}
+	if cfg.Runtime.TokenSafety.GlobalHardLimitTokens == 0 {
+		t.Fatal("expected tokenSafety.globalHardLimitTokens default > 0")
+	}
+	if cfg.Runtime.TokenSafety.SessionHardLimitTokens == 0 {
+		t.Fatal("expected tokenSafety.sessionHardLimitTokens default > 0")
+	}
+	if cfg.Runtime.TokenSafety.SubagentRunHardLimitTokens == 0 {
+		t.Fatal("expected tokenSafety.subagentRunHardLimitTokens default > 0")
+	}
+	if !cfg.Runtime.TokenSafety.EstimateOnMissingUsage {
+		t.Fatal("expected tokenSafety.estimateOnMissingUsage default true")
+	}
+	if cfg.Runtime.TokenSafety.EstimateCharsPerToken != 4 {
+		t.Fatalf("unexpected tokenSafety.estimateCharsPerToken default: %d", cfg.Runtime.TokenSafety.EstimateCharsPerToken)
+	}
+	if len(cfg.Runtime.TokenSafety.TrustedWriters) == 0 || cfg.Runtime.TokenSafety.TrustedWriters[0] != "cli:user" {
+		t.Fatalf("unexpected tokenSafety.trustedWriters default: %#v", cfg.Runtime.TokenSafety.TrustedWriters)
+	}
 }
 
 func TestLoadBackfillsMissingMemoryAndSkillsFields(t *testing.T) {
@@ -90,5 +114,34 @@ func TestLoadIgnoresLegacyManagementObject(t *testing.T) {
 	}
 	if cfg.Gateway.Port != 18789 {
 		t.Fatalf("unexpected gateway port after loading legacy config: %d", cfg.Gateway.Port)
+	}
+}
+
+func TestLoadAppliesTokenSafetyEnvOverrides(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SQUIDBOT_TOKEN_SAFETY_ENABLED", "false")
+	t.Setenv("SQUIDBOT_TOKEN_SAFETY_MODE", "hard")
+	t.Setenv("SQUIDBOT_TOKEN_SAFETY_GLOBAL_HARD_LIMIT_TOKENS", "555")
+	t.Setenv("SQUIDBOT_TOKEN_SAFETY_ESTIMATE_CHARS_PER_TOKEN", "6")
+	t.Setenv("SQUIDBOT_TOKEN_SAFETY_TRUSTED_WRITERS", "cli:user,*:42")
+
+	cfg, err := Load(filepath.Join(t.TempDir(), "missing-config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Runtime.TokenSafety.Enabled {
+		t.Fatal("expected token safety disabled from env")
+	}
+	if cfg.Runtime.TokenSafety.Mode != "hard" {
+		t.Fatalf("unexpected mode from env: %q", cfg.Runtime.TokenSafety.Mode)
+	}
+	if cfg.Runtime.TokenSafety.GlobalHardLimitTokens != 555 {
+		t.Fatalf("unexpected global hard limit from env: %d", cfg.Runtime.TokenSafety.GlobalHardLimitTokens)
+	}
+	if cfg.Runtime.TokenSafety.EstimateCharsPerToken != 6 {
+		t.Fatalf("unexpected estimate chars from env: %d", cfg.Runtime.TokenSafety.EstimateCharsPerToken)
+	}
+	if len(cfg.Runtime.TokenSafety.TrustedWriters) != 2 {
+		t.Fatalf("unexpected trusted writers from env: %#v", cfg.Runtime.TokenSafety.TrustedWriters)
 	}
 }

@@ -52,6 +52,11 @@ I am squidbot.
 - subagent_status(run_id)
 - subagent_result(run_id)
 - subagent_cancel(run_id)
+- budget_status(run_id?)
+- budget_set_limits(global_hard_limit_tokens?, global_soft_threshold_pct?, session_hard_limit_tokens?, session_soft_threshold_pct?, subagent_run_hard_limit_tokens?, subagent_run_soft_threshold_pct?)
+- budget_set_mode(mode)
+- budget_set_enabled(enabled)
+- budget_set_estimation(estimate_on_missing_usage?, estimate_chars_per_token?)
 `,
 	"HEARTBEAT.md": `# Heartbeat Tasks
 

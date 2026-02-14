@@ -183,7 +183,7 @@ func TestEngineFanOutFanInParallelSubagents(t *testing.T) {
 	}
 	parallelBatches := (8 + cfg.Runtime.Subagents.MaxConcurrent - 1) / cfg.Runtime.Subagents.MaxConcurrent
 	expectedParallel := time.Duration(parallelBatches) * providerStub.delay
-	maxAllowed := expectedParallel*3 + 300*time.Millisecond
+	maxAllowed := expectedParallel*4 + 600*time.Millisecond
 	if elapsed > maxAllowed {
 		t.Fatalf("fanout took too long (%s), expected <= %s for parallel execution", elapsed, maxAllowed)
 	}

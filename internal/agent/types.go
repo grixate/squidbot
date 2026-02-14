@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/grixate/squidbot/internal/budget"
 	"github.com/grixate/squidbot/internal/mission"
 	"github.com/grixate/squidbot/internal/provider"
 	"github.com/grixate/squidbot/internal/subagent"
@@ -105,4 +106,15 @@ type SubagentStore interface {
 	ListSubagentRunsBySession(ctx context.Context, sessionID string, limit int) ([]subagent.Run, error)
 	ListSubagentRunsByStatus(ctx context.Context, status subagent.Status, limit int) ([]subagent.Run, error)
 	AppendSubagentEvent(ctx context.Context, event subagent.Event) error
+}
+
+type BudgetStore interface {
+	GetTokenSafetyOverride(ctx context.Context) (budget.TokenSafetyOverride, error)
+	PutTokenSafetyOverride(ctx context.Context, override budget.TokenSafetyOverride) error
+	GetBudgetCounter(ctx context.Context, scope string) (budget.Counter, error)
+	AddBudgetUsage(ctx context.Context, scope string, prompt, completion, total uint64) error
+	ReserveBudget(ctx context.Context, scope string, tokens uint64, ttlSec int) (reservationID string, err error)
+	FinalizeBudgetReservation(ctx context.Context, reservationID string, actualTotal uint64) error
+	CancelBudgetReservation(ctx context.Context, reservationID string) error
+	ListBudgetReservations(ctx context.Context, scope string, limit int) ([]budget.Reservation, error)
 }

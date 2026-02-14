@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/grixate/squidbot/internal/budget"
 	"github.com/grixate/squidbot/internal/config"
 	storepkg "github.com/grixate/squidbot/internal/storage/bbolt"
 	"github.com/grixate/squidbot/internal/subagent"
@@ -330,6 +331,48 @@ func TestSubagentsCancelWritesExternalCancelSignal(t *testing.T) {
 	}
 	if _, err := store.GetKV(ctx, subagent.CancelSignalNamespace, "run-cancel-signal"); err != nil {
 		t.Fatalf("expected cancel signal in kv: %v", err)
+	}
+}
+
+func TestBudgetCommandsPersistOverride(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := baseTestConfig(t)
+	configPath := writeTestConfig(t, cfg)
+
+	setMode := budgetCmd(configPath)
+	setMode.SilenceUsage = true
+	setMode.SilenceErrors = true
+	setMode.SetOut(io.Discard)
+	setMode.SetErr(io.Discard)
+	setMode.SetArgs([]string{"set-mode", "hard"})
+	if err := setMode.Execute(); err != nil {
+		t.Fatalf("set-mode command failed: %v", err)
+	}
+
+	disable := budgetCmd(configPath)
+	disable.SilenceUsage = true
+	disable.SilenceErrors = true
+	disable.SetOut(io.Discard)
+	disable.SetErr(io.Discard)
+	disable.SetArgs([]string{"disable"})
+	if err := disable.Execute(); err != nil {
+		t.Fatalf("disable command failed: %v", err)
+	}
+
+	store, err := storepkg.Open(cfg.Storage.DBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	override, err := store.GetTokenSafetyOverride(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if override.Settings.Mode != budget.ModeHard {
+		t.Fatalf("expected hard mode override, got %s", override.Settings.Mode)
+	}
+	if override.Settings.Enabled {
+		t.Fatal("expected token safety to be disabled by override")
 	}
 }
 

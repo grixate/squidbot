@@ -18,6 +18,7 @@ import (
 
 	"github.com/grixate/squidbot/internal/agent"
 	"github.com/grixate/squidbot/internal/app"
+	"github.com/grixate/squidbot/internal/budget"
 	"github.com/grixate/squidbot/internal/config"
 	"github.com/grixate/squidbot/internal/cron"
 	"github.com/grixate/squidbot/internal/memory"
@@ -62,6 +63,7 @@ func newRootCmd(logger *log.Logger) *cobra.Command {
 	root.AddCommand(telegramCmd(configPath))
 	root.AddCommand(cronCmd(configPath, logger))
 	root.AddCommand(subagentsCmd(configPath))
+	root.AddCommand(budgetCmd(configPath))
 	root.AddCommand(doctorCmd(configPath))
 	return root
 }
@@ -638,6 +640,212 @@ func subagentsCmd(configPath string) *cobra.Command {
 	root.AddCommand(cancel)
 
 	return root
+}
+
+func budgetCmd(configPath string) *cobra.Command {
+	root := &cobra.Command{Use: "budget", Short: "Inspect and manage token safety budgets"}
+	root.AddCommand(&cobra.Command{
+		Use:   "show",
+		Short: "Show effective token safety settings and usage counters",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := loadCfg(configPath)
+			if err != nil {
+				return err
+			}
+			store, err := storepkg.Open(cfg.Storage.DBPath)
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+			ctx := context.Background()
+			settings := effectiveTokenSafetySettings(ctx, cfg, store)
+			global, err := store.GetBudgetCounter(ctx, "global")
+			if err != nil {
+				return err
+			}
+			session := budget.Counter{}
+			sessionID := "cli:default"
+			session, _ = store.GetBudgetCounter(ctx, "session:"+sessionID)
+			payload := map[string]any{
+				"settings": settings,
+				"usage": map[string]any{
+					"global":  global,
+					"session": session,
+				},
+			}
+			raw, err := json.MarshalIndent(payload, "", "  ")
+			if err != nil {
+				return err
+			}
+			fmt.Println(string(raw))
+			return nil
+		},
+	})
+
+	var scope string
+	var tokens uint64
+	var soft int
+	setLimit := &cobra.Command{
+		Use:   "set-limit",
+		Short: "Set hard limit (and optional soft threshold) for a scope",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := loadCfg(configPath)
+			if err != nil {
+				return err
+			}
+			store, err := storepkg.Open(cfg.Storage.DBPath)
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+			ctx := context.Background()
+			settings := effectiveTokenSafetySettings(ctx, cfg, store)
+			switch strings.TrimSpace(strings.ToLower(scope)) {
+			case "global":
+				settings.GlobalHardLimitTokens = tokens
+				if cmd.Flags().Changed("soft-threshold") {
+					settings.GlobalSoftThresholdPct = soft
+				}
+			case "session":
+				settings.SessionHardLimitTokens = tokens
+				if cmd.Flags().Changed("soft-threshold") {
+					settings.SessionSoftThresholdPct = soft
+				}
+			case "subagent":
+				settings.SubagentRunHardLimitTokens = tokens
+				if cmd.Flags().Changed("soft-threshold") {
+					settings.SubagentRunSoftThresholdPct = soft
+				}
+			default:
+				return fmt.Errorf("unsupported scope %q (use global|session|subagent)", scope)
+			}
+			if err := putTokenSafetyOverride(ctx, store, settings); err != nil {
+				return err
+			}
+			fmt.Println("Token safety limit updated")
+			return nil
+		},
+	}
+	setLimit.Flags().StringVar(&scope, "scope", "global", "Scope: global|session|subagent")
+	setLimit.Flags().Uint64Var(&tokens, "tokens", 0, "Hard token limit")
+	setLimit.Flags().IntVar(&soft, "soft-threshold", 0, "Soft warning threshold percent (optional)")
+	_ = setLimit.MarkFlagRequired("scope")
+	_ = setLimit.MarkFlagRequired("tokens")
+	root.AddCommand(setLimit)
+
+	root.AddCommand(&cobra.Command{
+		Use:   "set-mode <mode>",
+		Short: "Set token safety mode (hybrid|soft|hard)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := loadCfg(configPath)
+			if err != nil {
+				return err
+			}
+			store, err := storepkg.Open(cfg.Storage.DBPath)
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+			ctx := context.Background()
+			settings := effectiveTokenSafetySettings(ctx, cfg, store)
+			settings.Mode = budget.Mode(budget.NormalizeMode(args[0]))
+			if err := putTokenSafetyOverride(ctx, store, settings); err != nil {
+				return err
+			}
+			fmt.Printf("Token safety mode set to %s\n", settings.Mode)
+			return nil
+		},
+	})
+
+	root.AddCommand(&cobra.Command{
+		Use:   "enable",
+		Short: "Enable token safety enforcement",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := loadCfg(configPath)
+			if err != nil {
+				return err
+			}
+			store, err := storepkg.Open(cfg.Storage.DBPath)
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+			ctx := context.Background()
+			settings := effectiveTokenSafetySettings(ctx, cfg, store)
+			settings.Enabled = true
+			if err := putTokenSafetyOverride(ctx, store, settings); err != nil {
+				return err
+			}
+			fmt.Println("Token safety enabled")
+			return nil
+		},
+	})
+
+	root.AddCommand(&cobra.Command{
+		Use:   "disable",
+		Short: "Disable token safety enforcement",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := loadCfg(configPath)
+			if err != nil {
+				return err
+			}
+			store, err := storepkg.Open(cfg.Storage.DBPath)
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+			ctx := context.Background()
+			settings := effectiveTokenSafetySettings(ctx, cfg, store)
+			settings.Enabled = false
+			if err := putTokenSafetyOverride(ctx, store, settings); err != nil {
+				return err
+			}
+			fmt.Println("Token safety disabled")
+			return nil
+		},
+	})
+	return root
+}
+
+func tokenSafetySettingsFromConfig(cfg config.Config) budget.Settings {
+	return budget.Settings{
+		Enabled:                     cfg.Runtime.TokenSafety.Enabled,
+		Mode:                        budget.Mode(budget.NormalizeMode(cfg.Runtime.TokenSafety.Mode)),
+		GlobalHardLimitTokens:       cfg.Runtime.TokenSafety.GlobalHardLimitTokens,
+		GlobalSoftThresholdPct:      cfg.Runtime.TokenSafety.GlobalSoftThresholdPct,
+		SessionHardLimitTokens:      cfg.Runtime.TokenSafety.SessionHardLimitTokens,
+		SessionSoftThresholdPct:     cfg.Runtime.TokenSafety.SessionSoftThresholdPct,
+		SubagentRunHardLimitTokens:  cfg.Runtime.TokenSafety.SubagentRunHardLimitTokens,
+		SubagentRunSoftThresholdPct: cfg.Runtime.TokenSafety.SubagentRunSoftThresholdPct,
+		EstimateOnMissingUsage:      cfg.Runtime.TokenSafety.EstimateOnMissingUsage,
+		EstimateCharsPerToken:       cfg.Runtime.TokenSafety.EstimateCharsPerToken,
+		TrustedWriters:              append([]string(nil), cfg.Runtime.TokenSafety.TrustedWriters...),
+		ReservationTTLSec:           300,
+	}.Normalized()
+}
+
+func effectiveTokenSafetySettings(ctx context.Context, cfg config.Config, store *storepkg.Store) budget.Settings {
+	settings := tokenSafetySettingsFromConfig(cfg)
+	if store == nil {
+		return settings
+	}
+	override, err := store.GetTokenSafetyOverride(ctx)
+	if err == nil {
+		return override.Settings.Normalized()
+	}
+	return settings
+}
+
+func putTokenSafetyOverride(ctx context.Context, store *storepkg.Store, settings budget.Settings) error {
+	if store == nil {
+		return fmt.Errorf("store is required")
+	}
+	return store.PutTokenSafetyOverride(ctx, budget.TokenSafetyOverride{
+		Settings:  settings.Normalized(),
+		UpdatedAt: time.Now().UTC(),
+		Version:   1,
+	})
 }
 
 func doctorCmd(configPath string) *cobra.Command {

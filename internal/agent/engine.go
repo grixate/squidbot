@@ -5,6 +5,7 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	mrand "math/rand"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/oklog/ulid/v2"
 
+	"github.com/grixate/squidbot/internal/budget"
 	"github.com/grixate/squidbot/internal/config"
 	"github.com/grixate/squidbot/internal/memory"
 	"github.com/grixate/squidbot/internal/mission"
@@ -34,25 +36,31 @@ type Store interface {
 	ToolEventStore
 	MissionStore
 	SubagentStore
+	BudgetStore
 	SaveCheckpoint(ctx context.Context, sessionID string, payload []byte) error
 	LoadCheckpoint(ctx context.Context, sessionID string) ([]byte, error)
 }
 
 type Engine struct {
-	cfg       config.Config
-	provider  provider.LLMProvider
-	model     string
-	store     Store
-	metrics   *telemetry.Metrics
-	log       *log.Logger
-	actors    *actor.System
-	outbound  chan OutboundMessage
-	policy    *tools.PathPolicy
-	memory    *memory.Manager
-	subagents *subagent.Manager
-	ulidMu    sync.Mutex
-	stateMu   sync.RWMutex
-	entropy   *ulid.MonotonicEntropy
+	cfg                 config.Config
+	provider            provider.LLMProvider
+	model               string
+	store               Store
+	metrics             *telemetry.Metrics
+	log                 *log.Logger
+	actors              *actor.System
+	outbound            chan OutboundMessage
+	policy              *tools.PathPolicy
+	memory              *memory.Manager
+	subagents           *subagent.Manager
+	budgetGuard         *budget.Guard
+	ulidMu              sync.Mutex
+	stateMu             sync.RWMutex
+	tokenSafetyMu       sync.Mutex
+	tokenSafetyCached   budget.Settings
+	tokenSafetyCachedAt time.Time
+	tokenSafetyCacheTTL time.Duration
+	entropy             *ulid.MonotonicEntropy
 }
 
 type processRequest struct {
@@ -71,16 +79,18 @@ func NewEngine(cfg config.Config, providerClient provider.LLMProvider, model str
 		metrics = &telemetry.Metrics{}
 	}
 	engine := &Engine{
-		cfg:      cfg,
-		provider: providerClient,
-		model:    model,
-		store:    store,
-		metrics:  metrics,
-		log:      logger,
-		outbound: make(chan OutboundMessage, 512),
-		policy:   policy,
-		memory:   memory.NewManager(cfg),
-		entropy:  ulid.Monotonic(mrand.New(mrand.NewSource(time.Now().UnixNano())), 0),
+		cfg:                 cfg,
+		provider:            providerClient,
+		model:               model,
+		store:               store,
+		metrics:             metrics,
+		log:                 logger,
+		outbound:            make(chan OutboundMessage, 512),
+		policy:              policy,
+		memory:              memory.NewManager(cfg),
+		budgetGuard:         budget.NewGuard(store, metrics),
+		tokenSafetyCacheTTL: 2 * time.Second,
+		entropy:             ulid.Monotonic(mrand.New(mrand.NewSource(time.Now().UnixNano())), 0),
 	}
 	system := actor.NewSystem(engine.newSessionHandler, cfg.Runtime.MailboxSize, cfg.Runtime.ActorIdleTTL.Duration)
 	system.SetActorHooks(func() { engine.metrics.ActiveActors.Add(1) }, func() { engine.metrics.ActiveActors.Add(-1) })
@@ -257,8 +267,30 @@ func (h *sessionHandler) process(ctx context.Context, msg InboundMessage) (strin
 		maxHops = 20
 	}
 	finalContent := ""
+	budgetWarnings := []string{}
 
 	for i := 0; i < maxHops; i++ {
+		settings := h.engine.effectiveTokenSafety(turnCtx)
+		scopeLimits := []budget.ScopeLimit{
+			{Key: "global", HardLimitTokens: settings.GlobalHardLimitTokens, SoftThresholdPct: settings.GlobalSoftThresholdPct},
+		}
+		if strings.TrimSpace(h.sessionID) != "" {
+			scopeLimits = append(scopeLimits, budget.ScopeLimit{
+				Key:              "session:" + strings.TrimSpace(h.sessionID),
+				HardLimitTokens:  settings.SessionHardLimitTokens,
+				SoftThresholdPct: settings.SessionSoftThresholdPct,
+			})
+		}
+		plannedTokens := uint64(max(cfg.Agents.Defaults.MaxTokens, 1))
+		preflight, preflightErr := h.engine.budgetGuard.Preflight(turnCtx, settings, scopeLimits, plannedTokens)
+		if preflightErr != nil {
+			var limitErr *budget.LimitError
+			if errors.As(preflightErr, &limitErr) {
+				finalContent = h.engine.formatBudgetLimitMessage(limitErr)
+				break
+			}
+			return "", preflightErr
+		}
 		h.engine.metrics.ProviderCalls.Add(1)
 		providerClient, model := h.engine.currentProviderModel()
 		response, chatErr := providerClient.Chat(turnCtx, provider.ChatRequest{
@@ -269,10 +301,28 @@ func (h *sessionHandler) process(ctx context.Context, msg InboundMessage) (strin
 			Temperature: cfg.Agents.Defaults.Temperature,
 		})
 		if chatErr != nil {
+			h.engine.budgetGuard.Abort(turnCtx, preflight)
 			h.engine.metrics.ProviderErrors.Add(1)
 			return "", chatErr
 		}
-		h.engine.recordUsage(turnCtx, response.Usage)
+		commit, commitErr := h.engine.budgetGuard.Commit(turnCtx, settings, scopeLimits, preflight, budget.Usage{
+			PromptTokens:     response.Usage.PromptTokens,
+			CompletionTokens: response.Usage.CompletionTokens,
+			TotalTokens:      response.Usage.TotalTokens,
+			OutputChars:      len(response.Content),
+		})
+		if commitErr != nil {
+			h.engine.log.Printf("failed to commit token budget usage: %v", commitErr)
+		}
+		h.engine.recordUsageDay(turnCtx,
+			uint64(max(response.Usage.PromptTokens, 0)),
+			uint64(max(response.Usage.CompletionTokens, 0)),
+			commit.TotalTokens,
+		)
+		for _, warning := range commit.Warnings {
+			budgetWarnings = append(budgetWarnings,
+				fmt.Sprintf("%s at %d%% of hard limit", warning.Scope, warning.ThresholdPct))
+		}
 
 		if response.HasToolCalls() {
 			messages = append(messages, provider.Message{Role: "assistant", Content: response.Content, ToolCalls: response.ToolCalls})
@@ -310,6 +360,9 @@ func (h *sessionHandler) process(ctx context.Context, msg InboundMessage) (strin
 
 	if strings.TrimSpace(finalContent) == "" {
 		finalContent = "I've completed processing but have no response to provide."
+	}
+	if len(budgetWarnings) > 0 {
+		finalContent = strings.TrimSpace(finalContent) + "\n\n[Token safety]\n- " + strings.Join(budgetWarnings, "\n- ")
 	}
 
 	if err := h.engine.store.AppendTurn(turnCtx, Turn{SessionID: h.sessionID, Role: "user", Content: msg.Content}); err != nil {
@@ -431,6 +484,26 @@ func (e *Engine) buildRegistry(msg InboundMessage) (*tools.Registry, error) {
 	cancelTool := tools.NewSubagentCancelTool(e.cancelSubtask)
 	cancelTool.SetContext(msg.SessionID)
 	registry.Register(cancelTool)
+
+	budgetStatusTool := tools.NewBudgetStatusTool(e.budgetStatus)
+	budgetStatusTool.SetContext(msg.SessionID, msg.Channel, msg.SenderID)
+	registry.Register(budgetStatusTool)
+
+	budgetSetLimitsTool := tools.NewBudgetSetLimitsTool(e.budgetSetLimits)
+	budgetSetLimitsTool.SetContext(msg.SessionID, msg.Channel, msg.SenderID)
+	registry.Register(budgetSetLimitsTool)
+
+	budgetSetModeTool := tools.NewBudgetSetModeTool(e.budgetSetMode)
+	budgetSetModeTool.SetContext(msg.SessionID, msg.Channel, msg.SenderID)
+	registry.Register(budgetSetModeTool)
+
+	budgetSetEnabledTool := tools.NewBudgetSetEnabledTool(e.budgetSetEnabled)
+	budgetSetEnabledTool.SetContext(msg.SessionID, msg.Channel, msg.SenderID)
+	registry.Register(budgetSetEnabledTool)
+
+	budgetSetEstimationTool := tools.NewBudgetSetEstimationTool(e.budgetSetEstimation)
+	budgetSetEstimationTool.SetContext(msg.SessionID, msg.Channel, msg.SenderID)
+	registry.Register(budgetSetEstimationTool)
 
 	createTaskTool := tools.NewCreateTaskTool(e.createMissionTask)
 	createTaskTool.SetContext(msg.SessionID, msg.Channel, msg.ChatID, msg.RequestID, msg.SenderID)
@@ -632,6 +705,224 @@ func ensureSubagentRunAccess(sessionID string, run subagent.Run) error {
 	return fmt.Errorf("subagent run %s does not belong to session %s", run.ID, sessionID)
 }
 
+func (e *Engine) budgetStatus(ctx context.Context, req tools.BudgetStatusRequest) (tools.BudgetStatusResponse, error) {
+	settings := e.effectiveTokenSafety(ctx)
+	scopes := []string{"global"}
+	if sessionID := strings.TrimSpace(req.SessionID); sessionID != "" {
+		scopes = append(scopes, "session:"+sessionID)
+	}
+	if runID := strings.TrimSpace(req.RunID); runID != "" {
+		scopes = append(scopes, "subagent:"+runID)
+	}
+	out := tools.BudgetStatusResponse{Settings: settings, Scopes: make([]tools.BudgetStatusScope, 0, len(scopes))}
+	for _, scope := range scopes {
+		counter, err := e.store.GetBudgetCounter(ctx, scope)
+		if err != nil && !errors.Is(err, budget.ErrNotFound) {
+			return tools.BudgetStatusResponse{}, err
+		}
+		hard, soft := tokenScopeLimit(scope, settings)
+		used := counter.TotalTokens
+		reserved := counter.ReservedTokens
+		softWarning := hard > 0 && soft > 0 && (used+reserved)*100 >= hard*uint64(soft)
+		hardExceeded := hard > 0 && used+reserved >= hard
+		out.Scopes = append(out.Scopes, tools.BudgetStatusScope{
+			Scope:        scope,
+			Used:         used,
+			Reserved:     reserved,
+			HardLimit:    hard,
+			WarningLevel: soft,
+			SoftWarning:  softWarning,
+			HardExceeded: hardExceeded,
+		})
+	}
+	return out, nil
+}
+
+func (e *Engine) budgetSetLimits(ctx context.Context, req tools.BudgetSetLimitsRequest) (tools.BudgetSetLimitsResponse, error) {
+	settings, err := e.updateTokenSafetySettings(ctx, req.Channel, req.SenderID, func(current *budget.Settings) error {
+		if req.GlobalHardLimitTokens != nil {
+			current.GlobalHardLimitTokens = *req.GlobalHardLimitTokens
+		}
+		if req.GlobalSoftThresholdPct != nil {
+			current.GlobalSoftThresholdPct = *req.GlobalSoftThresholdPct
+		}
+		if req.SessionHardLimitTokens != nil {
+			current.SessionHardLimitTokens = *req.SessionHardLimitTokens
+		}
+		if req.SessionSoftThresholdPct != nil {
+			current.SessionSoftThresholdPct = *req.SessionSoftThresholdPct
+		}
+		if req.SubagentRunHardLimitTokens != nil {
+			current.SubagentRunHardLimitTokens = *req.SubagentRunHardLimitTokens
+		}
+		if req.SubagentRunSoftThresholdPct != nil {
+			current.SubagentRunSoftThresholdPct = *req.SubagentRunSoftThresholdPct
+		}
+		return nil
+	})
+	if err != nil {
+		return tools.BudgetSetLimitsResponse{}, err
+	}
+	return tools.BudgetSetLimitsResponse{Settings: settings}, nil
+}
+
+func (e *Engine) budgetSetMode(ctx context.Context, req tools.BudgetSetModeRequest) (tools.BudgetSetModeResponse, error) {
+	settings, err := e.updateTokenSafetySettings(ctx, req.Channel, req.SenderID, func(current *budget.Settings) error {
+		current.Mode = budget.Mode(budget.NormalizeMode(req.Mode))
+		return nil
+	})
+	if err != nil {
+		return tools.BudgetSetModeResponse{}, err
+	}
+	return tools.BudgetSetModeResponse{Settings: settings}, nil
+}
+
+func (e *Engine) budgetSetEnabled(ctx context.Context, req tools.BudgetSetEnabledRequest) (tools.BudgetSetEnabledResponse, error) {
+	settings, err := e.updateTokenSafetySettings(ctx, req.Channel, req.SenderID, func(current *budget.Settings) error {
+		current.Enabled = req.Enabled
+		return nil
+	})
+	if err != nil {
+		return tools.BudgetSetEnabledResponse{}, err
+	}
+	return tools.BudgetSetEnabledResponse{Settings: settings}, nil
+}
+
+func (e *Engine) budgetSetEstimation(ctx context.Context, req tools.BudgetSetEstimationRequest) (tools.BudgetSetEstimationResponse, error) {
+	settings, err := e.updateTokenSafetySettings(ctx, req.Channel, req.SenderID, func(current *budget.Settings) error {
+		if req.EstimateOnMissingUsage != nil {
+			current.EstimateOnMissingUsage = *req.EstimateOnMissingUsage
+		}
+		if req.EstimateCharsPerToken != nil {
+			current.EstimateCharsPerToken = *req.EstimateCharsPerToken
+		}
+		return nil
+	})
+	if err != nil {
+		return tools.BudgetSetEstimationResponse{}, err
+	}
+	return tools.BudgetSetEstimationResponse{Settings: settings}, nil
+}
+
+func (e *Engine) updateTokenSafetySettings(ctx context.Context, channel, senderID string, mutate func(current *budget.Settings) error) (budget.Settings, error) {
+	if err := e.assertTrustedBudgetWriter(ctx, channel, senderID); err != nil {
+		return budget.Settings{}, err
+	}
+	current := e.effectiveTokenSafety(ctx)
+	if mutate != nil {
+		if err := mutate(&current); err != nil {
+			return budget.Settings{}, err
+		}
+	}
+	current = current.Normalized()
+	override := budget.TokenSafetyOverride{
+		Settings:  current,
+		UpdatedAt: time.Now().UTC(),
+		Version:   1,
+	}
+	if err := e.store.PutTokenSafetyOverride(ctx, override); err != nil {
+		return budget.Settings{}, err
+	}
+	e.invalidateTokenSafetyCache()
+	return current, nil
+}
+
+func (e *Engine) assertTrustedBudgetWriter(ctx context.Context, channel, senderID string) error {
+	if e.isTrustedBudgetWriter(ctx, channel, senderID) {
+		return nil
+	}
+	return fmt.Errorf("not authorized to modify token safety settings")
+}
+
+func (e *Engine) isTrustedBudgetWriter(ctx context.Context, channel, senderID string) bool {
+	channel = strings.ToLower(strings.TrimSpace(channel))
+	senderID = strings.ToLower(strings.TrimSpace(senderID))
+	if channel == "" || senderID == "" {
+		return false
+	}
+	settings := e.effectiveTokenSafety(ctx)
+	for _, raw := range settings.TrustedWriters {
+		entry := strings.ToLower(strings.TrimSpace(raw))
+		if entry == "" {
+			continue
+		}
+		parts := strings.SplitN(entry, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		if parts[1] != senderID {
+			continue
+		}
+		if parts[0] == "*" || parts[0] == channel {
+			return true
+		}
+	}
+	return false
+}
+
+func (e *Engine) effectiveTokenSafety(ctx context.Context) budget.Settings {
+	now := time.Now()
+	e.tokenSafetyMu.Lock()
+	if e.tokenSafetyCachedAt.Add(e.tokenSafetyCacheTTL).After(now) {
+		cached := e.tokenSafetyCached
+		e.tokenSafetyMu.Unlock()
+		return cached
+	}
+	e.tokenSafetyMu.Unlock()
+
+	cfg := e.currentConfig()
+	settings := tokenSafetySettingsFromConfig(cfg.Runtime.TokenSafety).Normalized()
+	override, err := e.store.GetTokenSafetyOverride(ctx)
+	if err == nil {
+		settings = override.Settings.Normalized()
+	} else if err != nil && !errors.Is(err, budget.ErrNotFound) {
+		e.log.Printf("failed to load token safety override: %v", err)
+	}
+
+	e.tokenSafetyMu.Lock()
+	e.tokenSafetyCached = settings
+	e.tokenSafetyCachedAt = now
+	e.tokenSafetyMu.Unlock()
+	return settings
+}
+
+func (e *Engine) invalidateTokenSafetyCache() {
+	e.tokenSafetyMu.Lock()
+	e.tokenSafetyCachedAt = time.Time{}
+	e.tokenSafetyCached = budget.Settings{}
+	e.tokenSafetyMu.Unlock()
+}
+
+func tokenSafetySettingsFromConfig(cfg config.TokenSafetyRuntimeConfig) budget.Settings {
+	return budget.Settings{
+		Enabled:                     cfg.Enabled,
+		Mode:                        budget.Mode(budget.NormalizeMode(cfg.Mode)),
+		GlobalHardLimitTokens:       cfg.GlobalHardLimitTokens,
+		GlobalSoftThresholdPct:      cfg.GlobalSoftThresholdPct,
+		SessionHardLimitTokens:      cfg.SessionHardLimitTokens,
+		SessionSoftThresholdPct:     cfg.SessionSoftThresholdPct,
+		SubagentRunHardLimitTokens:  cfg.SubagentRunHardLimitTokens,
+		SubagentRunSoftThresholdPct: cfg.SubagentRunSoftThresholdPct,
+		EstimateOnMissingUsage:      cfg.EstimateOnMissingUsage,
+		EstimateCharsPerToken:       cfg.EstimateCharsPerToken,
+		TrustedWriters:              append([]string(nil), cfg.TrustedWriters...),
+		ReservationTTLSec:           300,
+	}
+}
+
+func tokenScopeLimit(scope string, settings budget.Settings) (hard uint64, soft int) {
+	switch {
+	case scope == "global":
+		return settings.GlobalHardLimitTokens, settings.GlobalSoftThresholdPct
+	case strings.HasPrefix(scope, "session:"):
+		return settings.SessionHardLimitTokens, settings.SessionSoftThresholdPct
+	case strings.HasPrefix(scope, "subagent:"):
+		return settings.SubagentRunHardLimitTokens, settings.SubagentRunSoftThresholdPct
+	default:
+		return 0, 0
+	}
+}
+
 func (e *Engine) buildSubagentContextPacket(ctx context.Context, req tools.SpawnRequest) (subagent.ContextPacket, error) {
 	mode := req.ContextMode
 	if mode == "" {
@@ -766,7 +1057,32 @@ func (e *Engine) runSubtask(ctx context.Context, run subagent.Run) (subagent.Res
 		maxHops = 15
 	}
 	finalContent := ""
+	budgetWarnings := []string{}
 	for i := 0; i < maxHops; i++ {
+		settings := e.effectiveTokenSafety(ctx)
+		scopeLimits := []budget.ScopeLimit{
+			{Key: "global", HardLimitTokens: settings.GlobalHardLimitTokens, SoftThresholdPct: settings.GlobalSoftThresholdPct},
+		}
+		if strings.TrimSpace(run.SessionID) != "" {
+			scopeLimits = append(scopeLimits, budget.ScopeLimit{
+				Key:              "session:" + strings.TrimSpace(run.SessionID),
+				HardLimitTokens:  settings.SessionHardLimitTokens,
+				SoftThresholdPct: settings.SessionSoftThresholdPct,
+			})
+		}
+		scopeLimits = append(scopeLimits, budget.ScopeLimit{
+			Key:              "subagent:" + strings.TrimSpace(run.ID),
+			HardLimitTokens:  settings.SubagentRunHardLimitTokens,
+			SoftThresholdPct: settings.SubagentRunSoftThresholdPct,
+		})
+		preflight, preflightErr := e.budgetGuard.Preflight(ctx, settings, scopeLimits, uint64(max(cfg.Agents.Defaults.MaxTokens, 1)))
+		if preflightErr != nil {
+			var limitErr *budget.LimitError
+			if errors.As(preflightErr, &limitErr) {
+				return subagent.Result{}, fmt.Errorf("budget_exhausted: %w", limitErr)
+			}
+			return subagent.Result{}, preflightErr
+		}
 		e.metrics.ProviderCalls.Add(1)
 		providerClient, model := e.currentProviderModel()
 		resp, err := providerClient.Chat(ctx, provider.ChatRequest{
@@ -777,10 +1093,27 @@ func (e *Engine) runSubtask(ctx context.Context, run subagent.Run) (subagent.Res
 			Temperature: cfg.Agents.Defaults.Temperature,
 		})
 		if err != nil {
+			e.budgetGuard.Abort(ctx, preflight)
 			e.metrics.ProviderErrors.Add(1)
 			return subagent.Result{}, err
 		}
-		e.recordUsage(ctx, resp.Usage)
+		commit, commitErr := e.budgetGuard.Commit(ctx, settings, scopeLimits, preflight, budget.Usage{
+			PromptTokens:     resp.Usage.PromptTokens,
+			CompletionTokens: resp.Usage.CompletionTokens,
+			TotalTokens:      resp.Usage.TotalTokens,
+			OutputChars:      len(resp.Content),
+		})
+		if commitErr != nil {
+			e.log.Printf("failed to commit subagent token budget usage: %v", commitErr)
+		}
+		e.recordUsageDay(ctx,
+			uint64(max(resp.Usage.PromptTokens, 0)),
+			uint64(max(resp.Usage.CompletionTokens, 0)),
+			commit.TotalTokens,
+		)
+		for _, warning := range commit.Warnings {
+			budgetWarnings = append(budgetWarnings, fmt.Sprintf("%s at %d%% of hard limit", warning.Scope, warning.ThresholdPct))
+		}
 		if resp.HasToolCalls() {
 			messages = append(messages, provider.Message{Role: "assistant", Content: resp.Content, ToolCalls: resp.ToolCalls})
 			for _, tc := range resp.ToolCalls {
@@ -802,6 +1135,9 @@ func (e *Engine) runSubtask(ctx context.Context, run subagent.Run) (subagent.Res
 	}
 	if strings.TrimSpace(finalContent) == "" {
 		finalContent = "Task completed but no final response was generated."
+	}
+	if len(budgetWarnings) > 0 {
+		finalContent = strings.TrimSpace(finalContent) + "\n\n[Token safety]\n- " + strings.Join(budgetWarnings, "\n- ")
 	}
 	artifactPaths := []string{}
 	if strings.TrimSpace(run.ArtifactDir) != "" {
@@ -1090,17 +1426,31 @@ func sourceTypeFromContext(channel, sessionID, trigger string) mission.TaskSourc
 	}
 }
 
-func (e *Engine) recordUsage(ctx context.Context, usage provider.Usage) {
-	if usage.PromptTokens <= 0 && usage.CompletionTokens <= 0 && usage.TotalTokens <= 0 {
+func (e *Engine) formatBudgetLimitMessage(limitErr *budget.LimitError) string {
+	if limitErr == nil {
+		return "Token safety blocked this request."
+	}
+	return fmt.Sprintf(
+		"Token safety blocked this request for scope %s (used=%d reserved=%d requested=%d limit=%d). Adjust limits or disable token safety if this is expected.",
+		limitErr.Scope,
+		limitErr.Used,
+		limitErr.Reserved,
+		limitErr.Requested,
+		limitErr.Limit,
+	)
+}
+
+func (e *Engine) recordUsageDay(ctx context.Context, promptTokens, completionTokens, totalTokens uint64) {
+	if promptTokens == 0 && completionTokens == 0 && totalTokens == 0 {
 		return
 	}
 	day := time.Now().UTC().Format("2006-01-02")
 	if err := e.store.RecordUsageDay(
 		ctx,
 		day,
-		uint64(max(usage.PromptTokens, 0)),
-		uint64(max(usage.CompletionTokens, 0)),
-		uint64(max(usage.TotalTokens, 0)),
+		promptTokens,
+		completionTokens,
+		totalTokens,
 	); err != nil {
 		e.log.Printf("failed to record token usage: %v", err)
 	}

@@ -119,10 +119,11 @@ type StorageConfig struct {
 }
 
 type RuntimeConfig struct {
-	MailboxSize          int                   `json:"mailboxSize"`
-	ActorIdleTTL         DurationValue         `json:"actorIdleTtl"`
-	HeartbeatIntervalSec int                   `json:"heartbeatIntervalSec"`
-	Subagents            SubagentRuntimeConfig `json:"subagents"`
+	MailboxSize          int                      `json:"mailboxSize"`
+	ActorIdleTTL         DurationValue            `json:"actorIdleTtl"`
+	HeartbeatIntervalSec int                      `json:"heartbeatIntervalSec"`
+	Subagents            SubagentRuntimeConfig    `json:"subagents"`
+	TokenSafety          TokenSafetyRuntimeConfig `json:"tokenSafety"`
 }
 
 type SubagentRuntimeConfig struct {
@@ -136,6 +137,20 @@ type SubagentRuntimeConfig struct {
 	AllowWrites        bool `json:"allowWrites"`
 	NotifyOnComplete   bool `json:"notifyOnComplete"`
 	ReinjectCompletion bool `json:"reinjectCompletion"`
+}
+
+type TokenSafetyRuntimeConfig struct {
+	Enabled                     bool     `json:"enabled"`
+	Mode                        string   `json:"mode"`
+	GlobalHardLimitTokens       uint64   `json:"globalHardLimitTokens"`
+	GlobalSoftThresholdPct      int      `json:"globalSoftThresholdPct"`
+	SessionHardLimitTokens      uint64   `json:"sessionHardLimitTokens"`
+	SessionSoftThresholdPct     int      `json:"sessionSoftThresholdPct"`
+	SubagentRunHardLimitTokens  uint64   `json:"subagentRunHardLimitTokens"`
+	SubagentRunSoftThresholdPct int      `json:"subagentRunSoftThresholdPct"`
+	EstimateOnMissingUsage      bool     `json:"estimateOnMissingUsage"`
+	EstimateCharsPerToken       int      `json:"estimateCharsPerToken"`
+	TrustedWriters              []string `json:"trustedWriters"`
 }
 
 type MemoryConfig struct {
@@ -282,6 +297,19 @@ func Default() Config {
 				AllowWrites:        false,
 				NotifyOnComplete:   true,
 				ReinjectCompletion: false,
+			},
+			TokenSafety: TokenSafetyRuntimeConfig{
+				Enabled:                     true,
+				Mode:                        "hybrid",
+				GlobalHardLimitTokens:       1200000,
+				GlobalSoftThresholdPct:      85,
+				SessionHardLimitTokens:      180000,
+				SessionSoftThresholdPct:     85,
+				SubagentRunHardLimitTokens:  60000,
+				SubagentRunSoftThresholdPct: 85,
+				EstimateOnMissingUsage:      true,
+				EstimateCharsPerToken:       4,
+				TrustedWriters:              []string{"cli:user"},
 			},
 		},
 		Memory: MemoryConfig{
@@ -507,10 +535,83 @@ func applyEnvOverrides(cfg *Config) {
 			cfg.Runtime.Subagents.ReinjectCompletion = parsed
 		}
 	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_TOKEN_SAFETY_ENABLED")); value != "" {
+		parsed, err := strconv.ParseBool(value)
+		if err == nil {
+			cfg.Runtime.TokenSafety.Enabled = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_TOKEN_SAFETY_MODE")); value != "" {
+		cfg.Runtime.TokenSafety.Mode = strings.ToLower(value)
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_TOKEN_SAFETY_GLOBAL_HARD_LIMIT_TOKENS")); value != "" {
+		parsed, err := strconv.ParseUint(value, 10, 64)
+		if err == nil {
+			cfg.Runtime.TokenSafety.GlobalHardLimitTokens = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_TOKEN_SAFETY_GLOBAL_SOFT_THRESHOLD_PCT")); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err == nil {
+			cfg.Runtime.TokenSafety.GlobalSoftThresholdPct = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_TOKEN_SAFETY_SESSION_HARD_LIMIT_TOKENS")); value != "" {
+		parsed, err := strconv.ParseUint(value, 10, 64)
+		if err == nil {
+			cfg.Runtime.TokenSafety.SessionHardLimitTokens = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_TOKEN_SAFETY_SESSION_SOFT_THRESHOLD_PCT")); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err == nil {
+			cfg.Runtime.TokenSafety.SessionSoftThresholdPct = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_TOKEN_SAFETY_SUBAGENT_RUN_HARD_LIMIT_TOKENS")); value != "" {
+		parsed, err := strconv.ParseUint(value, 10, 64)
+		if err == nil {
+			cfg.Runtime.TokenSafety.SubagentRunHardLimitTokens = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_TOKEN_SAFETY_SUBAGENT_RUN_SOFT_THRESHOLD_PCT")); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err == nil {
+			cfg.Runtime.TokenSafety.SubagentRunSoftThresholdPct = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_TOKEN_SAFETY_ESTIMATE_ON_MISSING_USAGE")); value != "" {
+		parsed, err := strconv.ParseBool(value)
+		if err == nil {
+			cfg.Runtime.TokenSafety.EstimateOnMissingUsage = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_TOKEN_SAFETY_ESTIMATE_CHARS_PER_TOKEN")); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err == nil && parsed > 0 {
+			cfg.Runtime.TokenSafety.EstimateCharsPerToken = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_TOKEN_SAFETY_TRUSTED_WRITERS")); value != "" {
+		cfg.Runtime.TokenSafety.TrustedWriters = splitCSV(value)
+	}
 	applyDynamicProviderEnvOverrides(cfg)
 	applyDynamicChannelEnvOverrides(cfg)
 	migrateLegacyProviders(cfg)
 	migrateLegacyChannels(cfg)
+}
+
+func splitCSV(value string) []string {
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed == "" {
+			continue
+		}
+		out = append(out, trimmed)
+	}
+	return out
 }
 
 func (c Config) PrimaryProvider() (name string, provider ProviderConfig) {

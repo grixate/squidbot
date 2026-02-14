@@ -21,21 +21,25 @@ import (
 )
 
 var (
-	bucketSessions         = []byte("sessions")
-	bucketTurns            = []byte("turns")
-	bucketToolEvents       = []byte("tool_events")
-	bucketJobs             = []byte("jobs")
-	bucketJobRuns          = []byte("job_runs")
-	bucketKV               = []byte("kv")
-	bucketActorCheckpoints = []byte("actor_checkpoints")
-	bucketSchemaMigrations = []byte("schema_migrations")
-	bucketMissionTasks     = []byte("mission_tasks")
-	bucketMissionColumns   = []byte("mission_columns")
-	bucketMissionPolicy    = []byte("mission_policy")
-	bucketUsageDaily       = []byte("usage_daily")
-	bucketHeartbeatRuns    = []byte("heartbeat_runs")
-	bucketSubagentRuns     = []byte("subagent_runs")
-	bucketSubagentEvents   = []byte("subagent_events")
+	bucketSessions            = []byte("sessions")
+	bucketTurns               = []byte("turns")
+	bucketToolEvents          = []byte("tool_events")
+	bucketJobs                = []byte("jobs")
+	bucketJobRuns             = []byte("job_runs")
+	bucketKV                  = []byte("kv")
+	bucketActorCheckpoints    = []byte("actor_checkpoints")
+	bucketSchemaMigrations    = []byte("schema_migrations")
+	bucketMissionTasks        = []byte("mission_tasks")
+	bucketMissionColumns      = []byte("mission_columns")
+	bucketMissionPolicy       = []byte("mission_policy")
+	bucketUsageDaily          = []byte("usage_daily")
+	bucketHeartbeatRuns       = []byte("heartbeat_runs")
+	bucketSubagentRuns        = []byte("subagent_runs")
+	bucketSubagentEvents      = []byte("subagent_events")
+	bucketTokenSafetyOverride = []byte("token_safety_override")
+	bucketBudgetCounters      = []byte("budget_counters")
+	bucketBudgetReservations  = []byte("budget_reservations")
+	bucketBudgetEvents        = []byte("budget_events")
 )
 
 type writeTask struct {
@@ -106,6 +110,10 @@ func (s *Store) initSchema() error {
 			bucketHeartbeatRuns,
 			bucketSubagentRuns,
 			bucketSubagentEvents,
+			bucketTokenSafetyOverride,
+			bucketBudgetCounters,
+			bucketBudgetReservations,
+			bucketBudgetEvents,
 		}
 		for _, b := range buckets {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
