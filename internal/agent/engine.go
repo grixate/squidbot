@@ -2,10 +2,15 @@ package agent
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
 	mrand "math/rand"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +22,7 @@ import (
 	"github.com/grixate/squidbot/internal/mission"
 	"github.com/grixate/squidbot/internal/provider"
 	"github.com/grixate/squidbot/internal/runtime/actor"
+	"github.com/grixate/squidbot/internal/subagent"
 	"github.com/grixate/squidbot/internal/telemetry"
 	"github.com/grixate/squidbot/internal/tools"
 )
@@ -27,24 +33,26 @@ type Store interface {
 	SchedulerStore
 	ToolEventStore
 	MissionStore
+	SubagentStore
 	SaveCheckpoint(ctx context.Context, sessionID string, payload []byte) error
 	LoadCheckpoint(ctx context.Context, sessionID string) ([]byte, error)
 }
 
 type Engine struct {
-	cfg      config.Config
-	provider provider.LLMProvider
-	model    string
-	store    Store
-	metrics  *telemetry.Metrics
-	log      *log.Logger
-	actors   *actor.System
-	outbound chan OutboundMessage
-	policy   *tools.PathPolicy
-	memory   *memory.Manager
-	ulidMu   sync.Mutex
-	stateMu  sync.RWMutex
-	entropy  *ulid.MonotonicEntropy
+	cfg       config.Config
+	provider  provider.LLMProvider
+	model     string
+	store     Store
+	metrics   *telemetry.Metrics
+	log       *log.Logger
+	actors    *actor.System
+	outbound  chan OutboundMessage
+	policy    *tools.PathPolicy
+	memory    *memory.Manager
+	subagents *subagent.Manager
+	ulidMu    sync.Mutex
+	stateMu   sync.RWMutex
+	entropy   *ulid.MonotonicEntropy
 }
 
 type processRequest struct {
@@ -77,6 +85,21 @@ func NewEngine(cfg config.Config, providerClient provider.LLMProvider, model str
 	system := actor.NewSystem(engine.newSessionHandler, cfg.Runtime.MailboxSize, cfg.Runtime.ActorIdleTTL.Duration)
 	system.SetActorHooks(func() { engine.metrics.ActiveActors.Add(1) }, func() { engine.metrics.ActiveActors.Add(-1) })
 	engine.actors = system
+	subCfg := cfg.Runtime.Subagents
+	engine.subagents = subagent.NewManager(subagent.Options{
+		Enabled:          subCfg.Enabled,
+		MaxConcurrent:    subCfg.MaxConcurrent,
+		MaxQueue:         subCfg.MaxQueue,
+		DefaultTimeout:   time.Duration(subCfg.DefaultTimeoutSec) * time.Second,
+		MaxAttempts:      subCfg.MaxAttempts,
+		RetryBackoff:     time.Duration(subCfg.RetryBackoffSec) * time.Second,
+		MaxDepth:         subCfg.MaxDepth,
+		NotifyOnComplete: subCfg.NotifyOnComplete,
+		NextID:           engine.nextID,
+	}, store, engine.runSubtask, engine.notifySubagentCompletion, metrics)
+	if err := engine.subagents.Start(context.Background()); err != nil {
+		return nil, err
+	}
 	return engine, nil
 }
 
@@ -89,6 +112,9 @@ func (e *Engine) EmitOutbound(channel, chatID, content string, metadata map[stri
 }
 
 func (e *Engine) Close() error {
+	if e.subagents != nil {
+		e.subagents.Stop()
+	}
 	return e.actors.Stop()
 }
 
@@ -388,8 +414,23 @@ func (e *Engine) buildRegistry(msg InboundMessage) (*tools.Registry, error) {
 	registry.Register(messageTool)
 
 	spawnTool := tools.NewSpawnTool(e.spawnSubtask)
-	spawnTool.SetContext(msg.SessionID, msg.Channel, msg.ChatID, msg.SenderID)
+	spawnTool.SetContext(msg.SessionID, msg.Channel, msg.ChatID, msg.SenderID, subagentDepthFromMetadata(msg.Metadata))
 	registry.Register(spawnTool)
+	waitTool := tools.NewSubagentWaitTool(e.waitSubtasks)
+	waitTool.SetContext(msg.SessionID)
+	registry.Register(waitTool)
+
+	statusTool := tools.NewSubagentStatusTool(e.statusSubtask)
+	statusTool.SetContext(msg.SessionID)
+	registry.Register(statusTool)
+
+	resultTool := tools.NewSubagentResultTool(e.resultSubtask)
+	resultTool.SetContext(msg.SessionID)
+	registry.Register(resultTool)
+
+	cancelTool := tools.NewSubagentCancelTool(e.cancelSubtask)
+	cancelTool.SetContext(msg.SessionID)
+	registry.Register(cancelTool)
 
 	createTaskTool := tools.NewCreateTaskTool(e.createMissionTask)
 	createTaskTool.SetContext(msg.SessionID, msg.Channel, msg.ChatID, msg.RequestID, msg.SenderID)
@@ -402,7 +443,43 @@ func (e *Engine) buildRegistry(msg InboundMessage) (*tools.Registry, error) {
 	return registry, nil
 }
 
-func (e *Engine) spawnSubtask(ctx context.Context, req tools.SpawnRequest) (string, error) {
+func subagentDepthFromMetadata(metadata map[string]any) int {
+	if len(metadata) == 0 {
+		return 0
+	}
+	raw, ok := metadata["subagent_depth"]
+	if !ok || raw == nil {
+		return 0
+	}
+	switch value := raw.(type) {
+	case int:
+		return value
+	case int32:
+		return int(value)
+	case int64:
+		return int(value)
+	case float64:
+		return int(value)
+	case json.Number:
+		parsed, err := value.Int64()
+		if err == nil {
+			return int(parsed)
+		}
+	case string:
+		parsed, err := strconv.Atoi(strings.TrimSpace(value))
+		if err == nil {
+			return parsed
+		}
+	}
+	return 0
+}
+
+func (e *Engine) spawnSubtask(ctx context.Context, req tools.SpawnRequest) (tools.SpawnResponse, error) {
+	if e.subagents == nil {
+		return tools.SpawnResponse{}, fmt.Errorf("subagent manager is not configured")
+	}
+	cfg := e.currentConfig()
+	workspace := config.WorkspacePath(cfg)
 	taskID := e.nextID()
 	label := strings.TrimSpace(req.Label)
 	if label == "" {
@@ -412,49 +489,284 @@ func (e *Engine) spawnSubtask(ctx context.Context, req tools.SpawnRequest) (stri
 		}
 	}
 
-	go func() {
-		subCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		defer cancel()
-
-		result, err := e.runSubtask(subCtx, req.Task)
-		if err != nil {
-			result = "Error: " + err.Error()
+	packet, err := e.buildSubagentContextPacket(ctx, req)
+	if err != nil {
+		return tools.SpawnResponse{}, err
+	}
+	artifactDir := filepath.Join(workspace, ".squidbot", "subagents", taskID)
+	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
+		return tools.SpawnResponse{}, err
+	}
+	run, err := e.subagents.Enqueue(ctx, subagent.Request{
+		ID:               taskID,
+		SessionID:        req.SessionID,
+		Channel:          req.Channel,
+		ChatID:           req.ChatID,
+		SenderID:         req.SenderID,
+		Task:             req.Task,
+		Label:            label,
+		ContextMode:      req.ContextMode,
+		Attachments:      req.Attachments,
+		TimeoutSec:       req.TimeoutSec,
+		MaxAttempts:      req.MaxAttempts,
+		Depth:            req.Depth + 1,
+		NotifyOnComplete: cfg.Runtime.Subagents.NotifyOnComplete,
+		ArtifactDir:      artifactDir,
+		Context:          packet,
+	})
+	if err != nil {
+		return tools.SpawnResponse{}, err
+	}
+	if req.Wait {
+		waitTimeout := time.Duration(run.TimeoutSec+30) * time.Second
+		if req.TimeoutSec > 0 {
+			waitTimeout = time.Duration(req.TimeoutSec+30) * time.Second
 		}
-
-		announce := fmt.Sprintf("[Background task completed]\n\nTask: %s\n\nResult:\n%s", req.Task, result)
-		_, submitErr := e.Submit(context.Background(), InboundMessage{
-			RequestID: e.nextID(),
-			SessionID: req.SessionID,
-			Channel:   req.Channel,
-			ChatID:    req.ChatID,
-			SenderID:  "subagent",
-			Content:   announce,
-			CreatedAt: time.Now().UTC(),
-			Metadata:  map[string]interface{}{"task_id": taskID, "background": true},
-		})
-		if submitErr != nil {
-			e.log.Printf("failed to submit subtask completion: %v", submitErr)
+		waited, waitErr := e.subagents.Wait(ctx, []string{run.ID}, waitTimeout)
+		if waitErr != nil && len(waited) == 0 {
+			return tools.SpawnResponse{}, waitErr
 		}
-	}()
-
-	return fmt.Sprintf("Subagent [%s] started (id: %s). I'll notify you when it completes.", label, taskID), nil
+		if len(waited) > 0 {
+			run = waited[0]
+		}
+		text := fmt.Sprintf("Subagent [%s] finished with status %s (run_id: %s).", label, run.Status, run.ID)
+		if run.Result != nil && strings.TrimSpace(run.Result.Summary) != "" {
+			text += "\n" + run.Result.Summary
+		}
+		if waitErr != nil {
+			text += "\nWait interrupted: " + waitErr.Error()
+		}
+		return tools.SpawnResponse{RunID: run.ID, Status: run.Status, Result: run.Result, Text: text}, nil
+	}
+	return tools.SpawnResponse{
+		RunID:  run.ID,
+		Status: run.Status,
+		Text:   fmt.Sprintf("Subagent [%s] started (run_id: %s). I will notify on completion.", label, run.ID),
+	}, nil
 }
 
-func (e *Engine) runSubtask(ctx context.Context, task string) (string, error) {
-	cfg := e.currentConfig()
-	messages := []provider.Message{
-		{Role: "system", Content: "You are a background subagent. Complete only the assigned task and return a concise summary."},
-		{Role: "user", Content: task},
+func (e *Engine) waitSubtasks(ctx context.Context, req tools.SubagentWaitRequest) (tools.SubagentWaitResponse, error) {
+	if e.subagents == nil {
+		return tools.SubagentWaitResponse{}, fmt.Errorf("subagent manager is not configured")
 	}
+	for _, runID := range req.RunIDs {
+		run, err := e.subagents.Status(ctx, runID)
+		if err != nil {
+			return tools.SubagentWaitResponse{}, err
+		}
+		if err := ensureSubagentRunAccess(req.SessionID, run); err != nil {
+			return tools.SubagentWaitResponse{}, err
+		}
+	}
+	timeout := time.Duration(req.TimeoutSec) * time.Second
+	runs, err := e.subagents.Wait(ctx, req.RunIDs, timeout)
+	if err != nil {
+		return tools.SubagentWaitResponse{}, err
+	}
+	return tools.SubagentWaitResponse{Runs: runs}, nil
+}
+
+func (e *Engine) statusSubtask(ctx context.Context, req tools.SubagentStatusRequest) (tools.SubagentStatusResponse, error) {
+	if e.subagents == nil {
+		return tools.SubagentStatusResponse{}, fmt.Errorf("subagent manager is not configured")
+	}
+	run, err := e.subagents.Status(ctx, req.RunID)
+	if err != nil {
+		return tools.SubagentStatusResponse{}, err
+	}
+	if err := ensureSubagentRunAccess(req.SessionID, run); err != nil {
+		return tools.SubagentStatusResponse{}, err
+	}
+	return tools.SubagentStatusResponse{Run: run}, nil
+}
+
+func (e *Engine) resultSubtask(ctx context.Context, req tools.SubagentResultRequest) (tools.SubagentResultResponse, error) {
+	if e.subagents == nil {
+		return tools.SubagentResultResponse{}, fmt.Errorf("subagent manager is not configured")
+	}
+	run, err := e.subagents.Result(ctx, req.RunID)
+	if err != nil {
+		return tools.SubagentResultResponse{}, err
+	}
+	if err := ensureSubagentRunAccess(req.SessionID, run); err != nil {
+		return tools.SubagentResultResponse{}, err
+	}
+	result := tools.SubagentResultResponse{
+		Status:  string(run.Status),
+		Attempt: run.Attempt,
+	}
+	if run.Result != nil {
+		result.Summary = run.Result.Summary
+		result.Output = run.Result.Output
+		result.ArtifactPaths = run.Result.ArtifactPaths
+	}
+	return result, nil
+}
+
+func (e *Engine) cancelSubtask(ctx context.Context, req tools.SubagentCancelRequest) (tools.SubagentCancelResponse, error) {
+	if e.subagents == nil {
+		return tools.SubagentCancelResponse{}, fmt.Errorf("subagent manager is not configured")
+	}
+	current, err := e.subagents.Status(ctx, req.RunID)
+	if err != nil {
+		return tools.SubagentCancelResponse{}, err
+	}
+	if err := ensureSubagentRunAccess(req.SessionID, current); err != nil {
+		return tools.SubagentCancelResponse{}, err
+	}
+	run, err := e.subagents.Cancel(ctx, req.RunID)
+	if err != nil {
+		return tools.SubagentCancelResponse{}, err
+	}
+	return tools.SubagentCancelResponse{RunID: run.ID, Status: string(run.Status)}, nil
+}
+
+func ensureSubagentRunAccess(sessionID string, run subagent.Run) error {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil
+	}
+	if strings.TrimSpace(run.SessionID) == sessionID {
+		return nil
+	}
+	return fmt.Errorf("subagent run %s does not belong to session %s", run.ID, sessionID)
+}
+
+func (e *Engine) buildSubagentContextPacket(ctx context.Context, req tools.SpawnRequest) (subagent.ContextPacket, error) {
+	mode := req.ContextMode
+	if mode == "" {
+		mode = subagent.ContextModeMinimal
+	}
+	cfg := e.currentConfig()
+	workspace := config.WorkspacePath(cfg)
+	packet := subagent.ContextPacket{
+		Mode:      mode,
+		CreatedAt: time.Now().UTC(),
+	}
+	packet.SystemPrompt = "You are a background subagent. Complete only the assigned task and return a concise summary."
+	if mode == subagent.ContextModeSession {
+		packet.SystemPrompt += " Use the supplied parent session context."
+	}
+	if mode == subagent.ContextModeSessionMemory {
+		packet.SystemPrompt = buildSystemPrompt(cfg, req.Task)
+	}
+	if req.SessionID != "" && mode != subagent.ContextModeMinimal {
+		history, err := e.store.Window(ctx, req.SessionID, 24)
+		if err == nil {
+			packet.History = history
+		}
+	}
+	for _, attachment := range req.Attachments {
+		resolved, err := e.policy.Resolve(attachment)
+		if err != nil {
+			return subagent.ContextPacket{}, err
+		}
+		packet.Attachments = append(packet.Attachments, resolved)
+	}
+	if mode == subagent.ContextModeSessionMemory && e.memory != nil && e.memory.Enabled() {
+		chunks, err := e.memory.Search(ctx, req.Task, minInt(6, cfg.Memory.TopK))
+		if err == nil {
+			for _, chunk := range chunks {
+				packet.MemorySnippets = append(packet.MemorySnippets, fmt.Sprintf("%s: %s", shortPath(workspace, chunk.Path), truncateText(chunk.Content, 240)))
+			}
+		}
+	}
+	checksumPayload, _ := json.Marshal(map[string]any{
+		"mode":            packet.Mode,
+		"system_prompt":   packet.SystemPrompt,
+		"history_len":     len(packet.History),
+		"memory_snippets": packet.MemorySnippets,
+		"attachments":     packet.Attachments,
+		"task":            strings.TrimSpace(req.Task),
+	})
+	sum := sha1.Sum(checksumPayload)
+	packet.Checksum = hex.EncodeToString(sum[:])
+	return packet, nil
+}
+
+func (e *Engine) notifySubagentCompletion(run subagent.Run) {
+	if strings.TrimSpace(run.Channel) == "" || strings.TrimSpace(run.ChatID) == "" {
+		return
+	}
+	cfg := e.currentConfig()
+	lines := []string{
+		"[Subagent completed]",
+		"",
+		fmt.Sprintf("Run: %s", run.ID),
+		fmt.Sprintf("Status: %s", run.Status),
+		fmt.Sprintf("Task: %s", run.Task),
+	}
+	if run.Result != nil && strings.TrimSpace(run.Result.Summary) != "" {
+		lines = append(lines, "", "Summary:", run.Result.Summary)
+	}
+	if strings.TrimSpace(run.Error) != "" {
+		lines = append(lines, "", "Error:", run.Error)
+	}
+	e.send(run.Channel, run.ChatID, strings.Join(lines, "\n"), map[string]interface{}{
+		"session_id":     run.SessionID,
+		"source":         "subagent",
+		"run_id":         run.ID,
+		"status":         run.Status,
+		"subagent_depth": run.Depth,
+	})
+	if cfg.Runtime.Subagents.ReinjectCompletion {
+		_, err := e.Submit(context.Background(), InboundMessage{
+			RequestID: e.nextID(),
+			SessionID: run.SessionID,
+			Channel:   run.Channel,
+			ChatID:    run.ChatID,
+			SenderID:  "subagent",
+			Content:   strings.Join(lines, "\n"),
+			CreatedAt: time.Now().UTC(),
+			Metadata: map[string]any{
+				"source":         "subagent_reinjected",
+				"run_id":         run.ID,
+				"status":         run.Status,
+				"subagent_depth": run.Depth,
+			},
+		})
+		if err != nil {
+			e.log.Printf("failed to reinject subagent completion: %v", err)
+		}
+	}
+}
+
+func (e *Engine) runSubtask(ctx context.Context, run subagent.Run) (subagent.Result, error) {
+	cfg := e.currentConfig()
+	systemPrompt := strings.TrimSpace(run.Context.SystemPrompt)
+	if systemPrompt == "" {
+		systemPrompt = "You are a background subagent. Complete only the assigned task and return a concise summary."
+	}
+	messages := []provider.Message{
+		{Role: "system", Content: systemPrompt},
+	}
+	if len(run.Context.History) > 0 {
+		messages = append(messages, run.Context.History...)
+	}
+	if len(run.Context.MemorySnippets) > 0 {
+		messages = append(messages, provider.Message{Role: "user", Content: "Relevant memory:\n- " + strings.Join(run.Context.MemorySnippets, "\n- ")})
+	}
+	if len(run.Context.Attachments) > 0 {
+		messages = append(messages, provider.Message{Role: "user", Content: "Attachment paths available in workspace:\n- " + strings.Join(run.Context.Attachments, "\n- ")})
+	}
+	messages = append(messages, provider.Message{Role: "user", Content: run.Task})
 	registry := tools.NewRegistry()
 	registry.Register(tools.NewReadFileTool(e.policy))
-	registry.Register(tools.NewWriteFileTool(e.policy))
+	if cfg.Runtime.Subagents.AllowWrites {
+		registry.Register(tools.NewWriteFileTool(e.policy))
+		registry.Register(tools.NewEditFileTool(e.policy))
+	}
 	registry.Register(tools.NewListDirTool(e.policy))
 	registry.Register(tools.NewExecTool(e.policy, time.Duration(cfg.Agents.Defaults.ToolTimeoutSec)*time.Second))
 	registry.Register(tools.NewWebSearchTool(cfg.Tools.Web.Search.APIKey, cfg.Tools.Web.Search.MaxResults))
 	registry.Register(tools.NewWebFetchTool(30000))
 
-	for i := 0; i < 15; i++ {
+	maxHops := cfg.Agents.Defaults.MaxToolIterations
+	if maxHops <= 0 {
+		maxHops = 15
+	}
+	finalContent := ""
+	for i := 0; i < maxHops; i++ {
 		e.metrics.ProviderCalls.Add(1)
 		providerClient, model := e.currentProviderModel()
 		resp, err := providerClient.Chat(ctx, provider.ChatRequest{
@@ -466,26 +778,53 @@ func (e *Engine) runSubtask(ctx context.Context, task string) (string, error) {
 		})
 		if err != nil {
 			e.metrics.ProviderErrors.Add(1)
-			return "", err
+			return subagent.Result{}, err
 		}
 		e.recordUsage(ctx, resp.Usage)
 		if resp.HasToolCalls() {
 			messages = append(messages, provider.Message{Role: "assistant", Content: resp.Content, ToolCalls: resp.ToolCalls})
 			for _, tc := range resp.ToolCalls {
+				e.metrics.ToolCalls.Add(1)
 				result, toolErr := registry.Execute(ctx, tc.Name, tc.Arguments)
 				if toolErr != nil {
+					e.metrics.ToolErrors.Add(1)
 					result = tools.ToolResult{Text: toolErr.Error()}
 				}
 				messages = append(messages, provider.Message{Role: "tool", ToolCallID: tc.ID, Name: tc.Name, Content: result.Text})
 			}
 			continue
 		}
-		if strings.TrimSpace(resp.Content) == "" {
-			return "Task completed.", nil
+		finalContent = strings.TrimSpace(resp.Content)
+		if finalContent == "" {
+			finalContent = "Task completed."
 		}
-		return resp.Content, nil
+		break
 	}
-	return "Task completed but no final response was generated.", nil
+	if strings.TrimSpace(finalContent) == "" {
+		finalContent = "Task completed but no final response was generated."
+	}
+	artifactPaths := []string{}
+	if strings.TrimSpace(run.ArtifactDir) != "" {
+		if err := os.MkdirAll(run.ArtifactDir, 0o755); err != nil {
+			return subagent.Result{}, err
+		}
+		resultPath := filepath.Join(run.ArtifactDir, "result.txt")
+		if err := os.WriteFile(resultPath, []byte(finalContent), 0o644); err != nil {
+			return subagent.Result{}, err
+		}
+		artifactPaths = append(artifactPaths, resultPath)
+		contextPath := filepath.Join(run.ArtifactDir, "context.json")
+		if data, err := json.MarshalIndent(run.Context, "", "  "); err == nil {
+			if err := os.WriteFile(contextPath, data, 0o644); err == nil {
+				artifactPaths = append(artifactPaths, contextPath)
+			}
+		}
+	}
+	summary := finalContent
+	if len(summary) > 240 {
+		summary = summary[:237] + "..."
+	}
+	return subagent.Result{Summary: summary, Output: finalContent, ArtifactPaths: artifactPaths}, nil
 }
 
 func (e *Engine) createMissionTask(ctx context.Context, req tools.CreateTaskRequest) (tools.TaskResult, error) {

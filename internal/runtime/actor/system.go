@@ -77,12 +77,17 @@ func (s *System) Stop() error {
 	s.wg.Wait()
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	actors := make([]*actorState, 0, len(s.actors))
 	for _, actor := range s.actors {
+		actors = append(actors, actor)
+	}
+	s.actors = map[string]*actorState{}
+	s.mu.Unlock()
+
+	for _, actor := range actors {
 		close(actor.mailbox)
 		<-actor.closed
 	}
-	s.actors = map[string]*actorState{}
 	return nil
 }
 

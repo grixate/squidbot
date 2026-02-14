@@ -24,6 +24,36 @@ func TestDefaultIncludesMemoryAndSkillsSettings(t *testing.T) {
 	if len(cfg.Skills.Paths) != 1 {
 		t.Fatalf("unexpected skills paths defaults: %#v", cfg.Skills.Paths)
 	}
+	if !cfg.Runtime.Subagents.Enabled {
+		t.Fatal("expected subagents.enabled default true")
+	}
+	if cfg.Runtime.Subagents.MaxConcurrent != 4 {
+		t.Fatalf("unexpected subagents.maxConcurrent default: %d", cfg.Runtime.Subagents.MaxConcurrent)
+	}
+	if cfg.Runtime.Subagents.MaxQueue != 64 {
+		t.Fatalf("unexpected subagents.maxQueue default: %d", cfg.Runtime.Subagents.MaxQueue)
+	}
+	if cfg.Runtime.Subagents.DefaultTimeoutSec != 300 {
+		t.Fatalf("unexpected subagents.defaultTimeoutSec default: %d", cfg.Runtime.Subagents.DefaultTimeoutSec)
+	}
+	if cfg.Runtime.Subagents.MaxAttempts != 2 {
+		t.Fatalf("unexpected subagents.maxAttempts default: %d", cfg.Runtime.Subagents.MaxAttempts)
+	}
+	if cfg.Runtime.Subagents.RetryBackoffSec != 8 {
+		t.Fatalf("unexpected subagents.retryBackoffSec default: %d", cfg.Runtime.Subagents.RetryBackoffSec)
+	}
+	if cfg.Runtime.Subagents.MaxDepth != 1 {
+		t.Fatalf("unexpected subagents.maxDepth default: %d", cfg.Runtime.Subagents.MaxDepth)
+	}
+	if cfg.Runtime.Subagents.AllowWrites {
+		t.Fatal("expected subagents.allowWrites default false")
+	}
+	if !cfg.Runtime.Subagents.NotifyOnComplete {
+		t.Fatal("expected subagents.notifyOnComplete default true")
+	}
+	if cfg.Runtime.Subagents.ReinjectCompletion {
+		t.Fatal("expected subagents.reinjectCompletion default false")
+	}
 }
 
 func TestLoadBackfillsMissingMemoryAndSkillsFields(t *testing.T) {

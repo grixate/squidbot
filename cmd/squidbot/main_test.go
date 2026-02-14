@@ -2,14 +2,18 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/grixate/squidbot/internal/config"
+	storepkg "github.com/grixate/squidbot/internal/storage/bbolt"
+	"github.com/grixate/squidbot/internal/subagent"
 )
 
 func writeTestConfig(t *testing.T, cfg config.Config) string {
@@ -270,6 +274,62 @@ func TestGatewayCommandDoesNotExposeWithManageFlag(t *testing.T) {
 	cmd := gatewayCmd("", log.New(io.Discard, "", 0))
 	if cmd.Flags().Lookup("with-manage") != nil {
 		t.Fatal("expected --with-manage flag to be removed")
+	}
+}
+
+func TestSubagentsCancelWritesExternalCancelSignal(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := baseTestConfig(t)
+	configPath := writeTestConfig(t, cfg)
+	store, err := storepkg.Open(cfg.Storage.DBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	now := time.Now().UTC()
+	run := subagent.Run{
+		ID:          "run-cancel-signal",
+		SessionID:   "cli:default",
+		Channel:     "cli",
+		ChatID:      "direct",
+		Task:        "long task",
+		Status:      subagent.StatusRunning,
+		CreatedAt:   now,
+		StartedAt:   &now,
+		TimeoutSec:  30,
+		MaxAttempts: 1,
+	}
+	if err := store.PutSubagentRun(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := subagentsCmd(configPath)
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{"cancel", "run-cancel-signal"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("cancel command failed: %v", err)
+	}
+
+	store, err = storepkg.Open(cfg.Storage.DBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	updated, err := store.GetSubagentRun(ctx, "run-cancel-signal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != subagent.StatusCancelled {
+		t.Fatalf("expected cancelled status, got %s", updated.Status)
+	}
+	if _, err := store.GetKV(ctx, subagent.CancelSignalNamespace, "run-cancel-signal"); err != nil {
+		t.Fatalf("expected cancel signal in kv: %v", err)
 	}
 }
 

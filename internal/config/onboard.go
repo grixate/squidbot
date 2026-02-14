@@ -47,7 +47,11 @@ I am squidbot.
 - web_search(query, count?)
 - web_fetch(url, extractMode?, maxChars?)
 - message(content, channel?, chat_id?)
-- spawn(task, label?)
+- spawn(task, label?, context_mode?, attachments?, timeout_sec?, max_attempts?, wait?)
+- subagent_wait(run_ids, timeout_sec?)
+- subagent_status(run_id)
+- subagent_result(run_id)
+- subagent_cancel(run_id)
 `,
 	"HEARTBEAT.md": `# Heartbeat Tasks
 

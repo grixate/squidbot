@@ -119,9 +119,23 @@ type StorageConfig struct {
 }
 
 type RuntimeConfig struct {
-	MailboxSize          int           `json:"mailboxSize"`
-	ActorIdleTTL         DurationValue `json:"actorIdleTtl"`
-	HeartbeatIntervalSec int           `json:"heartbeatIntervalSec"`
+	MailboxSize          int                   `json:"mailboxSize"`
+	ActorIdleTTL         DurationValue         `json:"actorIdleTtl"`
+	HeartbeatIntervalSec int                   `json:"heartbeatIntervalSec"`
+	Subagents            SubagentRuntimeConfig `json:"subagents"`
+}
+
+type SubagentRuntimeConfig struct {
+	Enabled            bool `json:"enabled"`
+	MaxConcurrent      int  `json:"maxConcurrent"`
+	MaxQueue           int  `json:"maxQueue"`
+	DefaultTimeoutSec  int  `json:"defaultTimeoutSec"`
+	MaxAttempts        int  `json:"maxAttempts"`
+	RetryBackoffSec    int  `json:"retryBackoffSec"`
+	MaxDepth           int  `json:"maxDepth"`
+	AllowWrites        bool `json:"allowWrites"`
+	NotifyOnComplete   bool `json:"notifyOnComplete"`
+	ReinjectCompletion bool `json:"reinjectCompletion"`
 }
 
 type MemoryConfig struct {
@@ -257,6 +271,18 @@ func Default() Config {
 			MailboxSize:          64,
 			ActorIdleTTL:         DurationValue{Duration: 15 * time.Minute},
 			HeartbeatIntervalSec: 1800,
+			Subagents: SubagentRuntimeConfig{
+				Enabled:            true,
+				MaxConcurrent:      4,
+				MaxQueue:           64,
+				DefaultTimeoutSec:  300,
+				MaxAttempts:        2,
+				RetryBackoffSec:    8,
+				MaxDepth:           1,
+				AllowWrites:        false,
+				NotifyOnComplete:   true,
+				ReinjectCompletion: false,
+			},
 		},
 		Memory: MemoryConfig{
 			Enabled:            true,
@@ -419,6 +445,66 @@ func applyEnvOverrides(cfg *Config) {
 		}
 		if len(out) > 0 {
 			cfg.Skills.Paths = out
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_SUBAGENTS_ENABLED")); value != "" {
+		parsed, err := strconv.ParseBool(value)
+		if err == nil {
+			cfg.Runtime.Subagents.Enabled = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_SUBAGENTS_MAX_CONCURRENT")); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err == nil && parsed > 0 {
+			cfg.Runtime.Subagents.MaxConcurrent = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_SUBAGENTS_MAX_QUEUE")); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err == nil && parsed > 0 {
+			cfg.Runtime.Subagents.MaxQueue = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_SUBAGENTS_DEFAULT_TIMEOUT_SEC")); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err == nil && parsed > 0 {
+			cfg.Runtime.Subagents.DefaultTimeoutSec = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_SUBAGENTS_MAX_ATTEMPTS")); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err == nil && parsed > 0 {
+			cfg.Runtime.Subagents.MaxAttempts = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_SUBAGENTS_RETRY_BACKOFF_SEC")); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err == nil && parsed >= 0 {
+			cfg.Runtime.Subagents.RetryBackoffSec = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_SUBAGENTS_MAX_DEPTH")); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err == nil && parsed >= 0 {
+			cfg.Runtime.Subagents.MaxDepth = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_SUBAGENTS_ALLOW_WRITES")); value != "" {
+		parsed, err := strconv.ParseBool(value)
+		if err == nil {
+			cfg.Runtime.Subagents.AllowWrites = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_SUBAGENTS_NOTIFY_ON_COMPLETE")); value != "" {
+		parsed, err := strconv.ParseBool(value)
+		if err == nil {
+			cfg.Runtime.Subagents.NotifyOnComplete = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_SUBAGENTS_REINJECT_COMPLETION")); value != "" {
+		parsed, err := strconv.ParseBool(value)
+		if err == nil {
+			cfg.Runtime.Subagents.ReinjectCompletion = parsed
 		}
 	}
 	applyDynamicProviderEnvOverrides(cfg)

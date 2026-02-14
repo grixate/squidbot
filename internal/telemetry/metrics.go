@@ -15,6 +15,14 @@ type Metrics struct {
 	ToolErrors          atomic.Uint64
 	CronExecutions      atomic.Uint64
 	HeartbeatExecutions atomic.Uint64
+	SubagentQueued      atomic.Uint64
+	SubagentRunning     atomic.Uint64
+	SubagentSucceeded   atomic.Uint64
+	SubagentFailed      atomic.Uint64
+	SubagentTimedOut    atomic.Uint64
+	SubagentCancelled   atomic.Uint64
+	SubagentRetries     atomic.Uint64
+	SubagentQueueDepth  atomic.Uint64
 }
 
 func (m *Metrics) Snapshot() map[string]uint64 {
@@ -37,5 +45,13 @@ func (m *Metrics) Snapshot() map[string]uint64 {
 		"tool_errors":          m.ToolErrors.Load(),
 		"cron_executions":      m.CronExecutions.Load(),
 		"heartbeat_executions": m.HeartbeatExecutions.Load(),
+		"subagent_queued":      m.SubagentQueued.Load(),
+		"subagent_running":     m.SubagentRunning.Load(),
+		"subagent_succeeded":   m.SubagentSucceeded.Load(),
+		"subagent_failed":      m.SubagentFailed.Load(),
+		"subagent_timed_out":   m.SubagentTimedOut.Load(),
+		"subagent_cancelled":   m.SubagentCancelled.Load(),
+		"subagent_retries":     m.SubagentRetries.Load(),
+		"subagent_queue_depth": m.SubagentQueueDepth.Load(),
 	}
 }

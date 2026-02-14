@@ -34,6 +34,8 @@ var (
 	bucketMissionPolicy    = []byte("mission_policy")
 	bucketUsageDaily       = []byte("usage_daily")
 	bucketHeartbeatRuns    = []byte("heartbeat_runs")
+	bucketSubagentRuns     = []byte("subagent_runs")
+	bucketSubagentEvents   = []byte("subagent_events")
 )
 
 type writeTask struct {
@@ -102,6 +104,8 @@ func (s *Store) initSchema() error {
 			bucketMissionPolicy,
 			bucketUsageDaily,
 			bucketHeartbeatRuns,
+			bucketSubagentRuns,
+			bucketSubagentEvents,
 		}
 		for _, b := range buckets {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {

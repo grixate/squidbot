@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -22,6 +23,7 @@ import (
 	"github.com/grixate/squidbot/internal/memory"
 	"github.com/grixate/squidbot/internal/skills"
 	storepkg "github.com/grixate/squidbot/internal/storage/bbolt"
+	"github.com/grixate/squidbot/internal/subagent"
 )
 
 const squidbotRomanBanner = "                                 o8o        .o8   .o8                     .\n" +
@@ -59,6 +61,7 @@ func newRootCmd(logger *log.Logger) *cobra.Command {
 	root.AddCommand(gatewayCmd(configPath, logger))
 	root.AddCommand(telegramCmd(configPath))
 	root.AddCommand(cronCmd(configPath, logger))
+	root.AddCommand(subagentsCmd(configPath))
 	root.AddCommand(doctorCmd(configPath))
 	return root
 }
@@ -248,6 +251,29 @@ func agentCmd(configPath string, logger *log.Logger) *cobra.Command {
 
 			fmt.Println("Interactive mode (Ctrl+C to exit)")
 			reader := bufio.NewReader(os.Stdin)
+			stopAsync := make(chan struct{})
+			go func() {
+				for {
+					select {
+					case <-stopAsync:
+						return
+					case msg := <-runtime.Engine.Outbound():
+						if msg.Channel != "cli" {
+							continue
+						}
+						source, _ := msg.Metadata["source"].(string)
+						if source != "subagent" {
+							continue
+						}
+						msgSession, _ := msg.Metadata["session_id"].(string)
+						if strings.TrimSpace(msgSession) != "" && msgSession != sessionID {
+							continue
+						}
+						fmt.Printf("\n\n[async]\n%s\n\nYou: ", msg.Content)
+					}
+				}
+			}()
+			defer close(stopAsync)
 			for {
 				fmt.Print("You: ")
 				line, err := reader.ReadString('\n')
@@ -488,6 +514,128 @@ func cronCmd(configPath string, logger *log.Logger) *cobra.Command {
 	}
 	run.Flags().BoolVarP(&force, "force", "f", false, "Run even if disabled")
 	root.AddCommand(run)
+
+	return root
+}
+
+func subagentsCmd(configPath string) *cobra.Command {
+	root := &cobra.Command{Use: "subagents", Short: "Inspect and manage subagent runs"}
+	var sessionID string
+	var status string
+	var limit int
+	list := &cobra.Command{
+		Use:   "list",
+		Short: "List subagent runs",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := loadCfg(configPath)
+			if err != nil {
+				return err
+			}
+			store, err := storepkg.Open(cfg.Storage.DBPath)
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+			ctx := context.Background()
+			var runs []subagent.Run
+			if strings.TrimSpace(status) != "" {
+				runs, err = store.ListSubagentRunsByStatus(ctx, subagent.Status(strings.TrimSpace(strings.ToLower(status))), limit)
+			} else {
+				runs, err = store.ListSubagentRunsBySession(ctx, strings.TrimSpace(sessionID), limit)
+			}
+			if err != nil {
+				return err
+			}
+			if len(runs) == 0 {
+				fmt.Println("No subagent runs")
+				return nil
+			}
+			for _, run := range runs {
+				fmt.Printf("%s\t%s\tattempt %d/%d\t%s\n", run.ID, run.Status, run.Attempt, run.MaxAttempts, run.Task)
+			}
+			return nil
+		},
+	}
+	list.Flags().StringVar(&sessionID, "session", "", "Filter by session ID")
+	list.Flags().StringVar(&status, "status", "", "Filter by status (queued|running|succeeded|failed|timed_out|cancelled)")
+	list.Flags().IntVar(&limit, "limit", 50, "Max number of runs to return")
+	root.AddCommand(list)
+
+	show := &cobra.Command{
+		Use:   "show <run_id>",
+		Short: "Show one subagent run",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := loadCfg(configPath)
+			if err != nil {
+				return err
+			}
+			store, err := storepkg.Open(cfg.Storage.DBPath)
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+			run, err := store.GetSubagentRun(context.Background(), args[0])
+			if err != nil {
+				return err
+			}
+			payload, err := json.MarshalIndent(run, "", "  ")
+			if err != nil {
+				return err
+			}
+			fmt.Println(string(payload))
+			return nil
+		},
+	}
+	root.AddCommand(show)
+
+	cancel := &cobra.Command{
+		Use:   "cancel <run_id>",
+		Short: "Cancel a queued or running subagent run",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := loadCfg(configPath)
+			if err != nil {
+				return err
+			}
+			store, err := storepkg.Open(cfg.Storage.DBPath)
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+			ctx := context.Background()
+			run, err := store.GetSubagentRun(ctx, args[0])
+			if err != nil {
+				return err
+			}
+			if run.Status.Terminal() {
+				fmt.Printf("Run %s already terminal: %s\n", run.ID, run.Status)
+				return nil
+			}
+			now := time.Now().UTC()
+			if err := store.PutKV(ctx, subagent.CancelSignalNamespace, run.ID, []byte(now.Format(time.RFC3339Nano))); err != nil {
+				return err
+			}
+			run.Status = subagent.StatusCancelled
+			run.Error = "cancelled via CLI"
+			run.FinishedAt = &now
+			if err := store.PutSubagentRun(ctx, run); err != nil {
+				return err
+			}
+			if err := store.AppendSubagentEvent(ctx, subagent.Event{
+				RunID:     run.ID,
+				Status:    subagent.StatusCancelled,
+				Message:   "run cancelled via CLI",
+				Attempt:   run.Attempt,
+				CreatedAt: now,
+			}); err != nil {
+				return err
+			}
+			fmt.Printf("Run %s marked as cancelled\n", run.ID)
+			return nil
+		},
+	}
+	root.AddCommand(cancel)
 
 	return root
 }

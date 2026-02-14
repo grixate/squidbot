@@ -7,6 +7,7 @@ import (
 
 	"github.com/grixate/squidbot/internal/mission"
 	"github.com/grixate/squidbot/internal/provider"
+	"github.com/grixate/squidbot/internal/subagent"
 )
 
 type InboundMessage struct {
@@ -96,4 +97,12 @@ type MissionStore interface {
 	ListMissionColumns(ctx context.Context) ([]mission.Column, error)
 	RecordUsageDay(ctx context.Context, day string, promptTokens, completionTokens, totalTokens uint64) error
 	GetTaskAutomationPolicy(ctx context.Context) (mission.TaskAutomationPolicy, error)
+}
+
+type SubagentStore interface {
+	PutSubagentRun(ctx context.Context, run subagent.Run) error
+	GetSubagentRun(ctx context.Context, id string) (subagent.Run, error)
+	ListSubagentRunsBySession(ctx context.Context, sessionID string, limit int) ([]subagent.Run, error)
+	ListSubagentRunsByStatus(ctx context.Context, status subagent.Status, limit int) ([]subagent.Run, error)
+	AppendSubagentEvent(ctx context.Context, event subagent.Event) error
 }
