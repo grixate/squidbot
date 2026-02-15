@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/grixate/squidbot/internal/budget"
+	"github.com/grixate/squidbot/internal/federation"
 	"github.com/grixate/squidbot/internal/mission"
 	"github.com/grixate/squidbot/internal/provider"
 	"github.com/grixate/squidbot/internal/subagent"
@@ -147,4 +148,17 @@ type BudgetStore interface {
 	FinalizeBudgetReservation(ctx context.Context, reservationID string, actualTotal uint64) error
 	CancelBudgetReservation(ctx context.Context, reservationID string) error
 	ListBudgetReservations(ctx context.Context, scope string, limit int) ([]budget.Reservation, error)
+}
+
+type FederationStore interface {
+	PutFederationRun(ctx context.Context, run federation.DelegationRun) error
+	GetFederationRun(ctx context.Context, id string) (federation.DelegationRun, error)
+	ListFederationRuns(ctx context.Context, sessionID string, status federation.DelegationStatus, limit int) ([]federation.DelegationRun, error)
+	AppendFederationEvent(ctx context.Context, event federation.Event) error
+	PutFederationIdempotency(ctx context.Context, record federation.IdempotencyRecord) error
+	GetFederationIdempotency(ctx context.Context, originNodeID, idempotencyKey string) (federation.IdempotencyRecord, error)
+	DeleteFederationIdempotency(ctx context.Context, originNodeID, idempotencyKey string) error
+	PutFederationPeerHealth(ctx context.Context, health federation.PeerHealth) error
+	GetFederationPeerHealth(ctx context.Context, peerID string) (federation.PeerHealth, error)
+	ListFederationPeerHealth(ctx context.Context, limit int) ([]federation.PeerHealth, error)
 }

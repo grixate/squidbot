@@ -36,6 +36,10 @@ var (
 	bucketHeartbeatRuns       = []byte("heartbeat_runs")
 	bucketSubagentRuns        = []byte("subagent_runs")
 	bucketSubagentEvents      = []byte("subagent_events")
+	bucketFederationRuns      = []byte("federation_runs")
+	bucketFederationEvents    = []byte("federation_events")
+	bucketFederationIdem      = []byte("federation_idempotency")
+	bucketFederationPeerState = []byte("federation_peer_health")
 	bucketTokenSafetyOverride = []byte("token_safety_override")
 	bucketBudgetCounters      = []byte("budget_counters")
 	bucketBudgetReservations  = []byte("budget_reservations")
@@ -110,6 +114,10 @@ func (s *Store) initSchema() error {
 			bucketHeartbeatRuns,
 			bucketSubagentRuns,
 			bucketSubagentEvents,
+			bucketFederationRuns,
+			bucketFederationEvents,
+			bucketFederationIdem,
+			bucketFederationPeerState,
 			bucketTokenSafetyOverride,
 			bucketBudgetCounters,
 			bucketBudgetReservations,

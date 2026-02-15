@@ -33,6 +33,7 @@ type Runtime struct {
 	cancel     context.CancelFunc
 	done       chan struct{}
 	metricsSrv *http.Server
+	federationSrv *http.Server
 }
 
 func BuildRuntime(cfg config.Config, logger *log.Logger) (*Runtime, error) {
@@ -177,6 +178,7 @@ func (r *Runtime) StartGateway(ctx context.Context) error {
 	r.Cron.Start()
 	r.Heartbeat.Start()
 	r.startMetricsHTTP()
+	r.startFederationHTTP(ctx)
 
 	go func() {
 		defer close(r.done)
@@ -210,6 +212,9 @@ func (r *Runtime) Shutdown() error {
 	}
 	if r.metricsSrv != nil {
 		_ = r.metricsSrv.Shutdown(context.Background())
+	}
+	if r.federationSrv != nil {
+		_ = r.federationSrv.Shutdown(context.Background())
 	}
 	r.Cron.Stop()
 	r.Heartbeat.Stop()

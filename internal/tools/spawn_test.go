@@ -37,11 +37,16 @@ func TestSpawnToolParsesExtendedFields(t *testing.T) {
 	args, _ := json.Marshal(map[string]any{
 		"task":         "analyze",
 		"label":        "analysis",
+		"target":       "remote",
 		"context_mode": "session_memory",
 		"attachments":  []string{"README.md"},
 		"timeout_sec":  10,
 		"max_attempts": 3,
 		"wait":         true,
+		"required_capabilities": []string{"code", "qa"},
+		"preferred_roles":       []string{"reviewer"},
+		"preferred_peer_id":     "peer-a",
+		"allow_fallback":        false,
 	})
 	_, err := tool.Execute(context.Background(), args)
 	if err != nil {
@@ -52,6 +57,15 @@ func TestSpawnToolParsesExtendedFields(t *testing.T) {
 	}
 	if got.TimeoutSec != 10 || got.MaxAttempts != 3 || !got.Wait {
 		t.Fatalf("unexpected wait args: %+v", got)
+	}
+	if got.Target != "remote" {
+		t.Fatalf("unexpected target: %q", got.Target)
+	}
+	if got.PreferredPeerID != "peer-a" {
+		t.Fatalf("unexpected preferred peer: %q", got.PreferredPeerID)
+	}
+	if got.AllowFallback == nil || *got.AllowFallback {
+		t.Fatalf("expected allow fallback false, got %#v", got.AllowFallback)
 	}
 	if got.Depth != 2 {
 		t.Fatalf("unexpected depth: %d", got.Depth)
