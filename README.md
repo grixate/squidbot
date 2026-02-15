@@ -225,6 +225,28 @@ squidbot budget status
 
 ---
 
+## Roadmap
+
+Squidbot is built around a reliability-first core. Upcoming work focuses on making power features easier to operate at scale.
+
+### ✅ Near-term
+
+- **Configuration UI**
+  - A friendly interface for workspace setup, providers/channels, budgets, memory, and skills
+  - Validate configs before they go live (less "why is nothing working" time)
+
+- **Mission Control**
+  - Central dashboard for **tasks, resources, and analytics**
+  - Track job runs, budgets, tool usage, latency, failures, and success rates
+  - Clear "what happened, when, and why" views across sessions and automations
+
+- **Federated Multi-Agent Management**
+  - Visual control plane for subagents and federated nodes
+  - Agent lifecycle, budgets, and permissions management
+  - Peer health status, delegation history, and idempotent execution tracking
+
+---
+
 ## Testing & Quality
 
 ```bash
