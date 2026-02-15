@@ -19,10 +19,13 @@ var bootstrapFiles = []string{"AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md"}
 const (
 	maxBootstrapSectionChars = 5000
 	maxMemorySnippetChars    = 360
-	maxSkillSummaryChars     = 240
 )
 
 func buildSystemPrompt(cfg config.Config, userMessage string) string {
+	return buildSystemPromptWithSkills(cfg, userMessage, nil)
+}
+
+func buildSystemPromptWithSkills(cfg config.Config, userMessage string, activation *skills.ActivationResult) string {
 	workspace := config.WorkspacePath(cfg)
 	parts := []string{
 		"# squidbot",
@@ -75,16 +78,63 @@ func buildSystemPrompt(cfg config.Config, userMessage string) string {
 		}
 	}
 
-	discovery := skills.Discover(cfg)
-	if len(discovery.Skills) > 0 {
-		lines := make([]string, 0, len(discovery.Skills))
-		for _, skill := range discovery.Skills {
-			lines = append(lines, fmt.Sprintf("- %s (%s): %s", skill.Name, shortPath(workspace, skill.Path), truncateText(skill.Summary, maxSkillSummaryChars)))
-		}
-		parts = append(parts, "## Skill Contracts\n\n"+strings.Join(lines, "\n"))
+	if section := renderSkillContractsSection(cfg, workspace, activation); strings.TrimSpace(section) != "" {
+		parts = append(parts, section)
 	}
 
 	return strings.Join(parts, "\n")
+}
+
+func renderSkillContractsSection(cfg config.Config, workspace string, activation *skills.ActivationResult) string {
+	if activation == nil {
+		discovery := skills.Discover(cfg)
+		if len(discovery.Skills) == 0 {
+			return ""
+		}
+		lines := make([]string, 0, len(discovery.Skills))
+		for _, skill := range discovery.Skills {
+			lines = append(lines, fmt.Sprintf("- %s (%s): %s", skill.Name, shortPath(workspace, skill.Path), truncateText(skill.Summary, 240)))
+		}
+		return "## Skill Contracts\n\n" + strings.Join(lines, "\n")
+	}
+	if len(activation.Activated) == 0 {
+		return ""
+	}
+	lines := make([]string, 0, len(activation.Activated)+1)
+	lines = append(lines, fmt.Sprintf("Matched: %d, Activated: %d, Skipped: %d", activation.Diagnostics.Matched, activation.Diagnostics.Activated, activation.Diagnostics.Skipped))
+	maxChars := cfg.Skills.PromptMaxChars
+	if maxChars <= 0 {
+		maxChars = 12000
+	}
+	for _, activated := range activation.Activated {
+		desc := activated.Skill.Descriptor
+		referenceLine := "none"
+		if len(activated.Skill.ResolvedReferences) > 0 {
+			shortRefs := make([]string, 0, len(activated.Skill.ResolvedReferences))
+			for _, ref := range activated.Skill.ResolvedReferences {
+				shortRefs = append(shortRefs, shortPath(workspace, ref))
+			}
+			referenceLine = strings.Join(shortRefs, ", ")
+		}
+		body := truncateText(activated.Skill.Body, maxInt(cfg.Skills.SkillMaxChars, 1))
+		lines = append(lines,
+			fmt.Sprintf("- %s [%s] (%s) reason=%s score=%d refs=%s\n%s",
+				desc.Name,
+				desc.ID,
+				shortPath(workspace, desc.Path),
+				activated.Reason,
+				activated.Score,
+				referenceLine,
+				body,
+			),
+		)
+		joined := strings.Join(lines, "\n\n")
+		if len(joined) > maxChars {
+			lines = lines[:len(lines)-1]
+			break
+		}
+	}
+	return "## Skill Contracts\n\n" + strings.Join(lines, "\n\n")
 }
 
 func buildMessages(systemPrompt string, history []provider.Message, userMessage string) []provider.Message {
@@ -124,4 +174,11 @@ func minInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func maxInt(v, floor int) int {
+	if v < floor {
+		return floor
+	}
+	return v
 }

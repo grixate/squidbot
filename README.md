@@ -19,8 +19,8 @@ Current channel scope is intentionally narrow (Telegram + CLI) while core runtim
 - Hybrid memory context in prompts: curated memory + retrieved chunks + recent daily notes
 - Cron scheduler, heartbeat service, and structured run/event recording
 - Provider adapters: OpenRouter, Anthropic, OpenAI, Gemini, Ollama, LM Studio
-- Skills discovery from `skills/**/SKILL.md`
-- Doctor checks for provider readiness, workspace contract, memory index, and skills availability
+- Dedicated skills runtime with metadata routing + progressive disclosure from `skills/**/SKILL.md` and local zip bundles
+- Doctor checks for provider readiness, workspace contract, memory index, and skill runtime health
 
 ## Architecture At A Glance
 
@@ -113,7 +113,7 @@ Prompt assembly includes:
 - curated memory (`memory/MEMORY.md`)
 - retrieved memory chunks from indexed markdown
 - recent daily memory snippets
-- discovered skill summaries
+- activated skill contracts (full playbook text for matched/explicit skills only)
 
 ## Memory Behavior
 
@@ -165,6 +165,10 @@ Telegram flags:
 - `squidbot cron enable <job_id> [--disable]`
 - `squidbot cron run <job_id> [--force]`
 - `squidbot doctor`
+- `squidbot skills list [--channel <id>] [--json]`
+- `squidbot skills show <skill_id> [--channel <id>] [--query "<text>"] [--mention <skill>] [--json]`
+- `squidbot skills check [--strict] [--json]`
+- `squidbot skills reload`
 
 ## Branch Policy
 

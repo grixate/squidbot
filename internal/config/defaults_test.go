@@ -24,6 +24,33 @@ func TestDefaultIncludesMemoryAndSkillsSettings(t *testing.T) {
 	if len(cfg.Skills.Paths) != 1 {
 		t.Fatalf("unexpected skills paths defaults: %#v", cfg.Skills.Paths)
 	}
+	if !cfg.Skills.Enabled {
+		t.Fatal("expected skills.enabled default true")
+	}
+	if cfg.Skills.MaxActive != 3 {
+		t.Fatalf("unexpected skills.maxActive default: %d", cfg.Skills.MaxActive)
+	}
+	if cfg.Skills.MatchThreshold != 35 {
+		t.Fatalf("unexpected skills.matchThreshold default: %d", cfg.Skills.MatchThreshold)
+	}
+	if cfg.Skills.RefreshIntervalSec != 30 {
+		t.Fatalf("unexpected skills.refreshIntervalSec default: %d", cfg.Skills.RefreshIntervalSec)
+	}
+	if cfg.Skills.PromptMaxChars != 12000 {
+		t.Fatalf("unexpected skills.promptMaxChars default: %d", cfg.Skills.PromptMaxChars)
+	}
+	if cfg.Skills.SkillMaxChars != 4000 {
+		t.Fatalf("unexpected skills.skillMaxChars default: %d", cfg.Skills.SkillMaxChars)
+	}
+	if !cfg.Skills.AllowZip {
+		t.Fatal("expected skills.allowZip default true")
+	}
+	if cfg.Skills.CacheDir == "" {
+		t.Fatal("expected skills.cacheDir default")
+	}
+	if cfg.Skills.Policy.Channels == nil {
+		t.Fatal("expected skills.policy.channels default map")
+	}
 	if !cfg.Runtime.Subagents.Enabled {
 		t.Fatal("expected subagents.enabled default true")
 	}
@@ -53,6 +80,24 @@ func TestDefaultIncludesMemoryAndSkillsSettings(t *testing.T) {
 	}
 	if cfg.Runtime.Subagents.ReinjectCompletion {
 		t.Fatal("expected subagents.reinjectCompletion default false")
+	}
+	if cfg.Runtime.Federation.Enabled {
+		t.Fatal("expected federation.enabled default false")
+	}
+	if cfg.Runtime.Federation.ListenAddr == "" {
+		t.Fatal("expected federation.listenAddr default")
+	}
+	if cfg.Runtime.Federation.RequestTimeoutSec <= 0 {
+		t.Fatal("expected federation.requestTimeoutSec > 0")
+	}
+	if cfg.Runtime.Federation.MaxRetries < 0 {
+		t.Fatal("expected federation.maxRetries >= 0")
+	}
+	if cfg.Runtime.Federation.RetryBackoffMs < 0 {
+		t.Fatal("expected federation.retryBackoffMs >= 0")
+	}
+	if !cfg.Runtime.Federation.AutoFallback {
+		t.Fatal("expected federation.autoFallback default true")
 	}
 	if !cfg.Runtime.TokenSafety.Enabled {
 		t.Fatal("expected tokenSafety.enabled default true")
@@ -143,5 +188,46 @@ func TestLoadAppliesTokenSafetyEnvOverrides(t *testing.T) {
 	}
 	if len(cfg.Runtime.TokenSafety.TrustedWriters) != 2 {
 		t.Fatalf("unexpected trusted writers from env: %#v", cfg.Runtime.TokenSafety.TrustedWriters)
+	}
+}
+
+func TestLoadAppliesSkillsEnvOverrides(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SQUIDBOT_SKILLS_ENABLED", "false")
+	t.Setenv("SQUIDBOT_SKILLS_MAX_ACTIVE", "5")
+	t.Setenv("SQUIDBOT_SKILLS_MATCH_THRESHOLD", "41")
+	t.Setenv("SQUIDBOT_SKILLS_REFRESH_INTERVAL_SEC", "42")
+	t.Setenv("SQUIDBOT_SKILLS_PROMPT_MAX_CHARS", "6000")
+	t.Setenv("SQUIDBOT_SKILLS_SKILL_MAX_CHARS", "900")
+	t.Setenv("SQUIDBOT_SKILLS_ALLOW_ZIP", "false")
+	t.Setenv("SQUIDBOT_SKILLS_CACHE_DIR", "/tmp/skills-cache")
+
+	cfg, err := Load(filepath.Join(t.TempDir(), "missing-config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Skills.Enabled {
+		t.Fatal("expected skills disabled from env")
+	}
+	if cfg.Skills.MaxActive != 5 {
+		t.Fatalf("unexpected skills maxActive from env: %d", cfg.Skills.MaxActive)
+	}
+	if cfg.Skills.MatchThreshold != 41 {
+		t.Fatalf("unexpected skills matchThreshold from env: %d", cfg.Skills.MatchThreshold)
+	}
+	if cfg.Skills.RefreshIntervalSec != 42 {
+		t.Fatalf("unexpected skills refreshIntervalSec from env: %d", cfg.Skills.RefreshIntervalSec)
+	}
+	if cfg.Skills.PromptMaxChars != 6000 {
+		t.Fatalf("unexpected skills promptMaxChars from env: %d", cfg.Skills.PromptMaxChars)
+	}
+	if cfg.Skills.SkillMaxChars != 900 {
+		t.Fatalf("unexpected skills skillMaxChars from env: %d", cfg.Skills.SkillMaxChars)
+	}
+	if cfg.Skills.AllowZip {
+		t.Fatal("expected skills allowZip false from env")
+	}
+	if cfg.Skills.CacheDir != "/tmp/skills-cache" {
+		t.Fatalf("unexpected skills cacheDir from env: %s", cfg.Skills.CacheDir)
 	}
 }

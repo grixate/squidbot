@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/grixate/squidbot/internal/config"
+	"github.com/grixate/squidbot/internal/skills"
 )
 
 func TestBuildSystemPromptIncludesSkillsAndMemorySections(t *testing.T) {
@@ -55,6 +56,38 @@ func TestBuildSystemPromptTruncatesLargeBootstrapFiles(t *testing.T) {
 	prompt := buildSystemPrompt(cfg, "hello")
 	if strings.Contains(prompt, strings.Repeat("x", maxBootstrapSectionChars+100)) {
 		t.Fatal("expected oversized AGENTS.md content to be truncated")
+	}
+}
+
+func TestBuildSystemPromptWithSkillsUsesActivatedOnly(t *testing.T) {
+	workspace := t.TempDir()
+	mustWrite(t, filepath.Join(workspace, "AGENTS.md"), "# Agent")
+	mustWrite(t, filepath.Join(workspace, "SOUL.md"), "# Soul")
+	mustWrite(t, filepath.Join(workspace, "USER.md"), "# User")
+	mustWrite(t, filepath.Join(workspace, "TOOLS.md"), "# Tools")
+	mustWrite(t, filepath.Join(workspace, "memory", "MEMORY.md"), "memory")
+
+	cfg := config.Default()
+	cfg.Agents.Defaults.Workspace = workspace
+	activation := skills.ActivationResult{
+		Activated: []skills.SkillActivation{
+			{
+				Skill: skills.SkillMaterialized{
+					Descriptor: skills.SkillDescriptor{Name: "Planner", ID: "planner", Path: filepath.Join(workspace, "skills", "planner", "SKILL.md")},
+					Body:       "Use staged planning.",
+				},
+				Score:  1000,
+				Reason: "explicit",
+			},
+		},
+		Diagnostics: skills.ActivationDiagnostics{Matched: 3, Activated: 1, Skipped: 2},
+	}
+	prompt := buildSystemPromptWithSkills(cfg, "plan", &activation)
+	if !strings.Contains(prompt, "Planner [planner]") {
+		t.Fatalf("expected activated skill in prompt, got:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "No summary provided") {
+		t.Fatalf("did not expect full discovery list when activation exists, got:\n%s", prompt)
 	}
 }
 

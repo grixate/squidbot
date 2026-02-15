@@ -20,11 +20,13 @@ import (
 
 	"github.com/grixate/squidbot/internal/budget"
 	"github.com/grixate/squidbot/internal/config"
+	"github.com/grixate/squidbot/internal/federation"
 	"github.com/grixate/squidbot/internal/memory"
 	"github.com/grixate/squidbot/internal/mission"
 	"github.com/grixate/squidbot/internal/plugins"
 	"github.com/grixate/squidbot/internal/provider"
 	"github.com/grixate/squidbot/internal/runtime/actor"
+	"github.com/grixate/squidbot/internal/skills"
 	"github.com/grixate/squidbot/internal/subagent"
 	"github.com/grixate/squidbot/internal/telemetry"
 	"github.com/grixate/squidbot/internal/tools"
@@ -38,6 +40,7 @@ type Store interface {
 	MissionStore
 	SubagentStore
 	BudgetStore
+	FederationStore
 	SaveCheckpoint(ctx context.Context, sessionID string, payload []byte) error
 	LoadCheckpoint(ctx context.Context, sessionID string) ([]byte, error)
 }
@@ -54,8 +57,12 @@ type Engine struct {
 	policy              *tools.PathPolicy
 	memory              *memory.Manager
 	plugins             plugins.Runtime
+	skills              skills.Runtime
 	subagents           *subagent.Manager
 	budgetGuard         *budget.Guard
+	federationClient    *federation.Client
+	fedCancelMu         sync.Mutex
+	fedCancels          map[string]context.CancelFunc
 	ulidMu              sync.Mutex
 	stateMu             sync.RWMutex
 	tokenSafetyMu       sync.Mutex
@@ -91,6 +98,8 @@ func NewEngine(cfg config.Config, providerClient provider.LLMProvider, model str
 		policy:              policy,
 		memory:              memory.NewManager(cfg),
 		budgetGuard:         budget.NewGuard(store, metrics),
+		federationClient:    federation.NewClient(time.Duration(max(cfg.Runtime.Federation.RequestTimeoutSec, 1)) * time.Second),
+		fedCancels:          map[string]context.CancelFunc{},
 		tokenSafetyCacheTTL: 2 * time.Second,
 		entropy:             ulid.Monotonic(mrand.New(mrand.NewSource(time.Now().UnixNano())), 0),
 	}
@@ -99,6 +108,11 @@ func NewEngine(cfg config.Config, providerClient provider.LLMProvider, model str
 		return nil, fmt.Errorf("plugin discovery failed: %w", err)
 	}
 	engine.plugins = pluginRuntime
+	skillsRuntime := skills.NewManager(cfg, logger)
+	if err := skillsRuntime.Discover(context.Background()); err != nil {
+		return nil, fmt.Errorf("skills discovery failed: %w", err)
+	}
+	engine.skills = skillsRuntime
 	system := actor.NewSystem(engine.newSessionHandler, cfg.Runtime.MailboxSize, cfg.Runtime.ActorIdleTTL.Duration)
 	system.SetActorHooks(func() { engine.metrics.ActiveActors.Add(1) }, func() { engine.metrics.ActiveActors.Add(-1) })
 	engine.actors = system
@@ -195,7 +209,12 @@ func (e *Engine) AskStream(ctx context.Context, msg InboundMessage, sink StreamS
 	if providerClient.Capabilities().SupportsStream {
 		history, err := e.store.Window(ctx, msg.SessionID, 50)
 		if err == nil {
-			systemPrompt := buildSystemPrompt(cfg, msg.Content)
+			skillActivation, skillErr := e.activateSkills(ctx, msg.Content, msg.Channel, msg.SessionID, false, nil)
+			if skillErr != nil {
+				_ = sink.OnEvent(ctx, StreamEvent{Type: "error", Error: skillErr.Error(), Done: true})
+				return skillErr
+			}
+			systemPrompt := buildSystemPromptWithSkills(cfg, msg.Content, &skillActivation)
 			messages := buildMessages(systemPrompt, history, msg.Content)
 			events, errs := providerClient.Stream(ctx, provider.ChatRequest{
 				Messages:    messages,
@@ -284,6 +303,40 @@ func streamChunks(content string, chunkSize int) []string {
 		out = append(out, content[start:end])
 	}
 	return out
+}
+
+func (e *Engine) activateSkills(ctx context.Context, query, channel, sessionID string, isSubagent bool, explicitMentions []string) (skills.ActivationResult, error) {
+	if e == nil || e.skills == nil {
+		return skills.ActivationResult{}, nil
+	}
+	result, err := e.skills.Activate(ctx, skills.ActivationRequest{
+		Query:            query,
+		Channel:          channel,
+		SessionID:        sessionID,
+		ExplicitMentions: explicitMentions,
+		IsSubagent:       isSubagent,
+	})
+	if err != nil {
+		return skills.ActivationResult{}, err
+	}
+	e.metrics.SkillsRouterRuns.Add(1)
+	if len(result.Activated) > 0 {
+		e.metrics.SkillsActivatedTotal.Add(uint64(len(result.Activated)))
+	}
+	if result.Diagnostics.InvalidSeen > 0 {
+		e.metrics.SkillsInvalidSkipped.Add(uint64(result.Diagnostics.InvalidSeen))
+	}
+	if len(result.Errors) > 0 {
+		e.metrics.SkillsExplicitFailures.Add(uint64(len(result.Errors)))
+		return result, errors.New(strings.Join(result.Errors, "; "))
+	}
+	activatedIDs := make([]string, 0, len(result.Activated))
+	for _, item := range result.Activated {
+		activatedIDs = append(activatedIDs, item.Skill.Descriptor.ID)
+	}
+	e.log.Printf("event=skills_router channel=%s session_id=%s subagent=%v query_hash=%s explicit=%d activated=%v skipped=%d",
+		channel, sessionID, isSubagent, result.Diagnostics.QueryHash, len(result.Diagnostics.Explicit), activatedIDs, len(result.Skipped))
+	return result, nil
 }
 
 type pluginRuntimeTool struct {
@@ -427,7 +480,18 @@ func (h *sessionHandler) process(ctx context.Context, msg InboundMessage) (strin
 	if err != nil {
 		return "", err
 	}
-	systemPrompt := buildSystemPrompt(cfg, msg.Content)
+	skillActivation, skillErr := h.engine.activateSkills(turnCtx, msg.Content, msg.Channel, h.sessionID, false, nil)
+	if skillErr != nil {
+		finalContent := skillErr.Error()
+		_ = h.engine.store.AppendTurn(turnCtx, Turn{SessionID: h.sessionID, Role: "user", Content: msg.Content})
+		_ = h.engine.store.AppendTurn(turnCtx, Turn{SessionID: h.sessionID, Role: "assistant", Content: finalContent})
+		_ = h.engine.store.SaveSessionMeta(turnCtx, h.sessionID, map[string]interface{}{"last_channel": msg.Channel, "last_chat_id": msg.ChatID})
+		if msg.Channel != "cli" {
+			h.engine.send(msg.Channel, msg.ChatID, finalContent, map[string]interface{}{"session_id": msg.SessionID, "trace_id": traceID})
+		}
+		return finalContent, nil
+	}
+	systemPrompt := buildSystemPromptWithSkills(cfg, msg.Content, &skillActivation)
 	messages := buildMessages(systemPrompt, history, msg.Content)
 	registry, err := h.engine.buildRegistry(msg)
 	if err != nil {
@@ -675,6 +739,15 @@ func (e *Engine) buildRegistry(msg InboundMessage) (*tools.Registry, error) {
 	cancelTool.SetContext(msg.SessionID)
 	registry.Register(cancelTool)
 
+	federationPeersTool := tools.NewFederationPeersTool(func(ctx context.Context, req tools.FederationPeersRequest) (tools.FederationPeersResponse, error) {
+		peers, err := e.federationPeersStatus(ctx)
+		if err != nil {
+			return tools.FederationPeersResponse{}, err
+		}
+		return tools.FederationPeersResponse{Peers: peers}, nil
+	})
+	registry.Register(federationPeersTool)
+
 	budgetStatusTool := tools.NewBudgetStatusTool(e.budgetStatus)
 	budgetStatusTool.SetContext(msg.SessionID, msg.Channel, msg.SenderID)
 	registry.Register(budgetStatusTool)
@@ -756,6 +829,25 @@ func subagentDepthFromMetadata(metadata map[string]any) int {
 }
 
 func (e *Engine) spawnSubtask(ctx context.Context, req tools.SpawnRequest) (tools.SpawnResponse, error) {
+	target := strings.TrimSpace(strings.ToLower(req.Target))
+	switch target {
+	case "", "local":
+		return e.spawnLocalSubtask(ctx, req)
+	case "remote":
+		return e.spawnRemoteSubtask(ctx, req)
+	case "auto":
+		if e.currentConfig().Runtime.Federation.Enabled {
+			if out, err := e.spawnRemoteSubtask(ctx, req); err == nil {
+				return out, nil
+			}
+		}
+		return e.spawnLocalSubtask(ctx, req)
+	default:
+		return tools.SpawnResponse{}, fmt.Errorf("unsupported spawn target %q", target)
+	}
+}
+
+func (e *Engine) spawnLocalSubtask(ctx context.Context, req tools.SpawnRequest) (tools.SpawnResponse, error) {
 	if e.subagents == nil {
 		return tools.SpawnResponse{}, fmt.Errorf("subagent manager is not configured")
 	}
@@ -1138,6 +1230,10 @@ func (e *Engine) buildSubagentContextPacket(ctx context.Context, req tools.Spawn
 	}
 	cfg := e.currentConfig()
 	workspace := config.WorkspacePath(cfg)
+	skillActivation, skillErr := e.activateSkills(ctx, req.Task, req.Channel, req.SessionID, true, nil)
+	if skillErr != nil {
+		return subagent.ContextPacket{}, skillErr
+	}
 	packet := subagent.ContextPacket{
 		Mode:      mode,
 		CreatedAt: time.Now().UTC(),
@@ -1147,7 +1243,9 @@ func (e *Engine) buildSubagentContextPacket(ctx context.Context, req tools.Spawn
 		packet.SystemPrompt += " Use the supplied parent session context."
 	}
 	if mode == subagent.ContextModeSessionMemory {
-		packet.SystemPrompt = buildSystemPrompt(cfg, req.Task)
+		packet.SystemPrompt = buildSystemPromptWithSkills(cfg, req.Task, &skillActivation)
+	} else if section := renderSkillContractsSection(cfg, workspace, &skillActivation); strings.TrimSpace(section) != "" {
+		packet.SystemPrompt = strings.TrimSpace(packet.SystemPrompt) + "\n\n" + section
 	}
 	if req.SessionID != "" && mode != subagent.ContextModeMinimal {
 		history, err := e.store.Window(ctx, req.SessionID, 24)
@@ -1232,9 +1330,17 @@ func (e *Engine) notifySubagentCompletion(run subagent.Run) {
 
 func (e *Engine) runSubtask(ctx context.Context, run subagent.Run) (subagent.Result, error) {
 	cfg := e.currentConfig()
+	activation, activationErr := e.activateSkills(ctx, run.Task, run.Channel, run.SessionID, true, nil)
+	if activationErr != nil {
+		return subagent.Result{}, activationErr
+	}
+	workspace := config.WorkspacePath(cfg)
 	systemPrompt := strings.TrimSpace(run.Context.SystemPrompt)
 	if systemPrompt == "" {
 		systemPrompt = "You are a background subagent. Complete only the assigned task and return a concise summary."
+	}
+	if section := renderSkillContractsSection(cfg, workspace, &activation); strings.TrimSpace(section) != "" && !strings.Contains(systemPrompt, "## Skill Contracts") {
+		systemPrompt = strings.TrimSpace(systemPrompt) + "\n\n" + section
 	}
 	messages := []provider.Message{
 		{Role: "system", Content: systemPrompt},

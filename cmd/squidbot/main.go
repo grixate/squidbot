@@ -65,6 +65,7 @@ func newRootCmd(logger *log.Logger) *cobra.Command {
 	root.AddCommand(telegramCmd(configPath))
 	root.AddCommand(cronCmd(configPath, logger))
 	root.AddCommand(subagentsCmd(configPath))
+	root.AddCommand(skillsCmd(configPath))
 	root.AddCommand(budgetCmd(configPath))
 	root.AddCommand(doctorCmd(configPath))
 	return root
@@ -210,10 +211,22 @@ func statusCmd(configPath string) *cobra.Command {
 				cfg.Tools.Exec.Enabled, cfg.Tools.Filesystem.ParentWriteEnabled, cfg.Tools.Filesystem.SubagentWriteEnabled)
 			fmt.Printf("Plugins runtime: enabled=%v paths=%d timeoutSec=%d maxConcurrent=%d maxProcesses=%d\n",
 				cfg.Runtime.Plugins.Enabled, len(cfg.Runtime.Plugins.Paths), cfg.Runtime.Plugins.DefaultTimeoutSec, cfg.Runtime.Plugins.MaxConcurrent, cfg.Runtime.Plugins.MaxProcesses)
+			fmt.Printf("Federation runtime: enabled=%v nodeId=%s listen=%s peers=%d allowFrom=%d retries=%d backoffMs=%d autoFallback=%v\n",
+				cfg.Runtime.Federation.Enabled,
+				strings.TrimSpace(cfg.Runtime.Federation.NodeID),
+				cfg.Runtime.Federation.ListenAddr,
+				len(cfg.Runtime.Federation.Peers),
+				len(cfg.Runtime.Federation.AllowFromNodeIDs),
+				cfg.Runtime.Federation.MaxRetries,
+				cfg.Runtime.Federation.RetryBackoffMs,
+				cfg.Runtime.Federation.AutoFallback,
+			)
 			fmt.Printf("Metrics HTTP: enabled=%v listen=%s localhostOnly=%v authTokenSet=%v\n",
 				cfg.Runtime.MetricsHTTP.Enabled, cfg.Runtime.MetricsHTTP.ListenAddr, cfg.Runtime.MetricsHTTP.LocalhostOnly, strings.TrimSpace(cfg.Runtime.MetricsHTTP.AuthToken) != "")
 			fmt.Printf("Semantic memory: enabled=%v topKCandidates=%d rerankTopK=%d\n",
 				cfg.Memory.Semantic.Enabled, cfg.Memory.Semantic.TopKCandidates, cfg.Memory.Semantic.RerankTopK)
+			fmt.Printf("Skills runtime: enabled=%v paths=%d maxActive=%d allowZip=%v refreshSec=%d\n",
+				cfg.Skills.Enabled, len(cfg.Skills.Paths), cfg.Skills.MaxActive, cfg.Skills.AllowZip, cfg.Skills.RefreshIntervalSec)
 			return nil
 		},
 	}
@@ -678,6 +691,275 @@ func subagentsCmd(configPath string) *cobra.Command {
 	return root
 }
 
+func skillsCmd(configPath string) *cobra.Command {
+	root := &cobra.Command{Use: "skills", Short: "Inspect and validate skill runtime state"}
+	var channel string
+	var asJSON bool
+	list := &cobra.Command{
+		Use:   "list",
+		Short: "List discovered skills",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := loadCfg(configPath)
+			if err != nil {
+				return err
+			}
+			runtime := skills.NewManager(cfg, log.Default())
+			if err := runtime.Discover(cmd.Context()); err != nil {
+				return err
+			}
+			snapshot := runtime.Snapshot()
+			if asJSON {
+				raw, err := json.MarshalIndent(snapshot, "", "  ")
+				if err != nil {
+					return err
+				}
+				fmt.Fprintln(cmd.OutOrStdout(), string(raw))
+				return nil
+			}
+			for _, item := range snapshot.Skills {
+				decision := "enabled"
+				allowed, denied := skillsPolicyOutcome(cfg, channel, item)
+				if !allowed {
+					decision = denied
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\t%s\tvalid=%v\ttags=%s\t%s\n", item.ID, item.Name, item.SourceKind, item.Valid, strings.Join(item.Tags, ","), decision)
+				fmt.Fprintf(cmd.OutOrStdout(), "  %s\n", item.Path)
+			}
+			if len(snapshot.Warnings) > 0 {
+				fmt.Fprintln(cmd.OutOrStdout(), "Warnings:")
+				for _, warning := range snapshot.Warnings {
+					fmt.Fprintf(cmd.OutOrStdout(), "- %s\n", warning)
+				}
+			}
+			return nil
+		},
+	}
+	list.Flags().StringVar(&channel, "channel", "", "Channel id for policy visibility")
+	list.Flags().BoolVar(&asJSON, "json", false, "Emit JSON output")
+	root.AddCommand(list)
+
+	showJSON := false
+	showQuery := ""
+	showSessionID := ""
+	showSubagent := false
+	showMentions := []string{}
+	show := &cobra.Command{
+		Use:   "show <skill_id>",
+		Short: "Show one skill descriptor",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := loadCfg(configPath)
+			if err != nil {
+				return err
+			}
+			runtime := skills.NewManager(cfg, log.Default())
+			if err := runtime.Discover(cmd.Context()); err != nil {
+				return err
+			}
+			snapshot := runtime.Snapshot()
+			id := strings.ToLower(strings.TrimSpace(args[0]))
+			for _, item := range snapshot.Skills {
+				if strings.ToLower(item.ID) != id {
+					continue
+				}
+				allowed, denied := skillsPolicyOutcome(cfg, channel, item)
+				payload := map[string]any{
+					"skill":           item,
+					"channel":         channel,
+					"policy_allowed":  allowed,
+					"policy_decision": denied,
+				}
+				if strings.TrimSpace(showQuery) != "" {
+					activation, err := runtime.Activate(cmd.Context(), skills.ActivationRequest{
+						Query:            showQuery,
+						Channel:          channel,
+						SessionID:        strings.TrimSpace(showSessionID),
+						IsSubagent:       showSubagent,
+						ExplicitMentions: showMentions,
+					})
+					if err != nil {
+						payload["activation_error"] = err.Error()
+					} else {
+						status := "unmatched"
+						reason := ""
+						score := 0
+						matchedBy := []string{}
+						breakdown := skills.ScoreBreakdown{}
+						for _, ranked := range activation.Diagnostics.Ranked {
+							if strings.EqualFold(ranked.ID, item.ID) {
+								status = ranked.Status
+								reason = ranked.Reason
+								score = ranked.Score
+								matchedBy = append([]string(nil), ranked.MatchedBy...)
+								breakdown = ranked.Breakdown
+								break
+							}
+						}
+						payload["activation"] = map[string]any{
+							"query":      showQuery,
+							"status":     status,
+							"reason":     reason,
+							"score":      score,
+							"matched_by": matchedBy,
+							"breakdown":  breakdown,
+							"errors":     activation.Errors,
+							"warnings":   activation.Warnings,
+						}
+					}
+				}
+				if showJSON {
+					raw, err := json.MarshalIndent(payload, "", "  ")
+					if err != nil {
+						return err
+					}
+					fmt.Fprintln(cmd.OutOrStdout(), string(raw))
+					return nil
+				}
+				raw, err := json.MarshalIndent(payload, "", "  ")
+				if err != nil {
+					return err
+				}
+				fmt.Fprintln(cmd.OutOrStdout(), string(raw))
+				return nil
+			}
+			return fmt.Errorf("skill %q not found", args[0])
+		},
+	}
+	show.Flags().StringVar(&channel, "channel", "", "Channel id for policy visibility")
+	show.Flags().BoolVar(&showJSON, "json", false, "Emit JSON output")
+	show.Flags().StringVar(&showQuery, "query", "", "Evaluate activation scoring for this query")
+	show.Flags().StringVar(&showSessionID, "session", "", "Session id used for activation diagnostics")
+	show.Flags().BoolVar(&showSubagent, "subagent", false, "Evaluate routing as subagent context")
+	show.Flags().StringSliceVar(&showMentions, "mention", nil, "Explicit skill mentions for activation diagnostics (repeatable)")
+	root.AddCommand(show)
+
+	var strict bool
+	checkJSON := false
+	check := &cobra.Command{
+		Use:   "check",
+		Short: "Validate all discovered skills",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := loadCfg(configPath)
+			if err != nil {
+				return err
+			}
+			runtime := skills.NewManager(cfg, log.Default())
+			if err := runtime.Discover(cmd.Context()); err != nil {
+				return err
+			}
+			snapshot := runtime.Snapshot()
+			invalid := make([]skills.SkillDescriptor, 0)
+			for _, item := range snapshot.Skills {
+				if !item.Valid {
+					invalid = append(invalid, item)
+				}
+			}
+			payload := map[string]any{
+				"total":    len(snapshot.Skills),
+				"invalid":  len(invalid),
+				"warnings": snapshot.Warnings,
+			}
+			if checkJSON {
+				raw, err := json.MarshalIndent(payload, "", "  ")
+				if err != nil {
+					return err
+				}
+				fmt.Fprintln(cmd.OutOrStdout(), string(raw))
+			} else {
+				fmt.Fprintf(cmd.OutOrStdout(), "Skills: total=%d invalid=%d warnings=%d\n", len(snapshot.Skills), len(invalid), len(snapshot.Warnings))
+				for _, item := range invalid {
+					fmt.Fprintf(cmd.OutOrStdout(), "- %s (%s): %s\n", item.Name, item.ID, strings.Join(item.Errors, "; "))
+				}
+				for _, warning := range snapshot.Warnings {
+					fmt.Fprintf(cmd.OutOrStdout(), "- warning: %s\n", warning)
+				}
+			}
+			if strict && (len(invalid) > 0 || len(snapshot.Warnings) > 0) {
+				return fmt.Errorf("skills validation failed")
+			}
+			if len(invalid) > 0 {
+				return fmt.Errorf("found %d invalid skill(s)", len(invalid))
+			}
+			return nil
+		},
+	}
+	check.Flags().BoolVar(&strict, "strict", false, "Treat warnings as failures")
+	check.Flags().BoolVar(&checkJSON, "json", false, "Emit JSON output")
+	root.AddCommand(check)
+
+	reload := &cobra.Command{
+		Use:   "reload",
+		Short: "Force a skill index refresh",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := loadCfg(configPath)
+			if err != nil {
+				return err
+			}
+			runtime := skills.NewManager(cfg, log.Default())
+			snapshot, err := runtime.Reload(cmd.Context())
+			if err != nil {
+				return err
+			}
+			valid := 0
+			invalid := 0
+			for _, item := range snapshot.Skills {
+				if item.Valid {
+					valid++
+				} else {
+					invalid++
+				}
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Skills reloaded: total=%d valid=%d invalid=%d warnings=%d\n", len(snapshot.Skills), valid, invalid, len(snapshot.Warnings))
+			return nil
+		},
+	}
+	root.AddCommand(reload)
+
+	return root
+}
+
+func skillsPolicyOutcome(cfg config.Config, channel string, skill skills.SkillDescriptor) (bool, string) {
+	channel = strings.ToLower(strings.TrimSpace(channel))
+	matchAny := func(tokens []string) bool {
+		if len(tokens) == 0 {
+			return false
+		}
+		needle := strings.ToLower(skill.ID)
+		name := strings.ToLower(skill.Name)
+		for _, token := range tokens {
+			token = strings.ToLower(strings.TrimSpace(token))
+			if token == "" {
+				continue
+			}
+			if token == needle || token == name {
+				return true
+			}
+			for _, alias := range skill.Aliases {
+				if token == strings.ToLower(alias) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	if len(cfg.Skills.Policy.Allow) > 0 && !matchAny(cfg.Skills.Policy.Allow) {
+		return false, "denied_by_global_allowlist"
+	}
+	if matchAny(cfg.Skills.Policy.Deny) {
+		return false, "denied_by_global"
+	}
+	channelPolicy, ok := cfg.Skills.Policy.Channels[channel]
+	if ok {
+		if len(channelPolicy.Allow) > 0 && !matchAny(channelPolicy.Allow) {
+			return false, "denied_by_channel_allowlist"
+		}
+		if matchAny(channelPolicy.Deny) {
+			return false, "denied_by_channel"
+		}
+	}
+	return true, "allowed"
+}
+
 func budgetCmd(configPath string) *cobra.Command {
 	root := &cobra.Command{Use: "budget", Short: "Inspect and manage token safety budgets"}
 	root.AddCommand(&cobra.Command{
@@ -964,6 +1246,26 @@ func doctorCmd(configPath string) *cobra.Command {
 					problems = append(problems, "semantic memory rerankTopK must be > 0")
 				}
 			}
+			if cfg.Runtime.Federation.Enabled {
+				if strings.TrimSpace(cfg.Runtime.Federation.ListenAddr) == "" {
+					problems = append(problems, "federation enabled but runtime.federation.listenAddr missing")
+				}
+				for _, peer := range cfg.Runtime.Federation.Peers {
+					if !peer.Enabled {
+						continue
+					}
+					if strings.TrimSpace(peer.ID) == "" {
+						problems = append(problems, "federation peer enabled but id missing")
+						continue
+					}
+					if strings.TrimSpace(peer.BaseURL) == "" {
+						problems = append(problems, fmt.Sprintf("federation peer %q enabled but baseUrl missing", peer.ID))
+					}
+					if strings.TrimSpace(peer.AuthToken) == "" {
+						problems = append(problems, fmt.Sprintf("federation peer %q enabled but authToken missing", peer.ID))
+					}
+				}
+			}
 			workspace := config.WorkspacePath(cfg)
 			required := []string{
 				filepath.Join(workspace, "AGENTS.md"),
@@ -992,9 +1294,26 @@ func doctorCmd(configPath string) *cobra.Command {
 				}
 				_ = pluginRuntime.Close()
 			}
-			discovery := skills.Discover(cfg)
-			fmt.Printf("Skills discovered: %d\n", len(discovery.Skills))
-			for _, warning := range discovery.Warnings {
+			skillsRuntime := skills.NewManager(cfg, log.Default())
+			if err := skillsRuntime.Discover(cmd.Context()); err != nil {
+				problems = append(problems, "skills discovery failed: "+err.Error())
+			}
+			snapshot := skillsRuntime.Snapshot()
+			valid := 0
+			invalid := 0
+			zipCount := 0
+			for _, skill := range snapshot.Skills {
+				if skill.SourceKind == "zip" {
+					zipCount++
+				}
+				if skill.Valid {
+					valid++
+				} else {
+					invalid++
+				}
+			}
+			fmt.Printf("Skills discovered: total=%d valid=%d invalid=%d zip=%d enabled=%v\n", len(snapshot.Skills), valid, invalid, zipCount, cfg.Skills.Enabled)
+			for _, warning := range snapshot.Warnings {
 				fmt.Printf("Skill warning: %s\n", warning)
 			}
 			if len(problems) == 0 {

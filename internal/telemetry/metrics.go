@@ -23,11 +23,23 @@ type Metrics struct {
 	SubagentCancelled           atomic.Uint64
 	SubagentRetries             atomic.Uint64
 	SubagentQueueDepth          atomic.Uint64
+	DelegationsSubmitted        atomic.Uint64
+	DelegationsSucceeded        atomic.Uint64
+	DelegationsFailed           atomic.Uint64
+	DelegationLatencyMS         atomic.Uint64
+	PeerHealthState             atomic.Uint64
+	FallbackCount               atomic.Uint64
+	IdempotencyHits             atomic.Uint64
 	TokenSafetyPreflightAllowed atomic.Uint64
 	TokenSafetyPreflightBlocked atomic.Uint64
 	TokenSafetySoftWarnings     atomic.Uint64
 	TokenSafetyEstimatedUsage   atomic.Uint64
 	TokenSafetyDisabledBypass   atomic.Uint64
+	SkillsRouterRuns            atomic.Uint64
+	SkillsActivatedTotal        atomic.Uint64
+	SkillsExplicitFailures      atomic.Uint64
+	SkillsInvalidSkipped        atomic.Uint64
+	SkillsReloadTotal           atomic.Uint64
 }
 
 func (m *Metrics) Snapshot() map[string]uint64 {
@@ -58,10 +70,22 @@ func (m *Metrics) Snapshot() map[string]uint64 {
 		"subagent_cancelled":             m.SubagentCancelled.Load(),
 		"subagent_retries":               m.SubagentRetries.Load(),
 		"subagent_queue_depth":           m.SubagentQueueDepth.Load(),
+		"delegations_submitted_total":    m.DelegationsSubmitted.Load(),
+		"delegations_succeeded_total":    m.DelegationsSucceeded.Load(),
+		"delegations_failed_total":       m.DelegationsFailed.Load(),
+		"delegation_latency_ms":          m.DelegationLatencyMS.Load(),
+		"peer_health_state":              m.PeerHealthState.Load(),
+		"fallback_count_total":           m.FallbackCount.Load(),
+		"idempotency_hits_total":         m.IdempotencyHits.Load(),
 		"token_safety_preflight_allowed": m.TokenSafetyPreflightAllowed.Load(),
 		"token_safety_preflight_blocked": m.TokenSafetyPreflightBlocked.Load(),
 		"token_safety_soft_warnings":     m.TokenSafetySoftWarnings.Load(),
 		"token_safety_estimated_usage":   m.TokenSafetyEstimatedUsage.Load(),
 		"token_safety_disabled_bypass":   m.TokenSafetyDisabledBypass.Load(),
+		"skills_router_runs":             m.SkillsRouterRuns.Load(),
+		"skills_activated_total":         m.SkillsActivatedTotal.Load(),
+		"skills_explicit_failures":       m.SkillsExplicitFailures.Load(),
+		"skills_invalid_skipped":         m.SkillsInvalidSkipped.Load(),
+		"skills_reload_total":            m.SkillsReloadTotal.Load(),
 	}
 }

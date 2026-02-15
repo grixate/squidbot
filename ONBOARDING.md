@@ -62,7 +62,7 @@ Telegram flags:
 - required markdown workspace files
 - heartbeat file readability
 - memory index accessibility
-- discovered skill contract count
+- skill runtime summary (total/valid/invalid/zip counts + warnings)
 
 If provider setup is incomplete, runtime commands will fail with:
 

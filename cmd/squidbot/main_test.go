@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"log"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -380,5 +381,57 @@ func TestOnboardCommandDoesNotExposeWebMode(t *testing.T) {
 	cmd := onboardCmd("")
 	if cmd.Flags().Lookup("mode") != nil {
 		t.Fatal("expected --mode flag to be removed")
+	}
+}
+
+func TestSkillsCommandsListAndCheck(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := baseTestConfig(t)
+	workspace := cfg.Agents.Defaults.Workspace
+	cfg.Skills.Paths = []string{filepath.Join(workspace, "skills")}
+	if err := os.MkdirAll(filepath.Join(workspace, "skills", "planner"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "skills", "planner", "SKILL.md"), []byte("# Planner\nCreates plans"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	configPath := writeTestConfig(t, cfg)
+
+	skillsRoot := skillsCmd(configPath)
+	skillsRoot.SilenceUsage = true
+	skillsRoot.SilenceErrors = true
+	var out bytes.Buffer
+	skillsRoot.SetOut(&out)
+	skillsRoot.SetErr(io.Discard)
+	skillsRoot.SetArgs([]string{"list"})
+	if err := skillsRoot.Execute(); err != nil {
+		t.Fatalf("skills list failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "planner") {
+		t.Fatalf("expected planner in skills list output, got: %s", out.String())
+	}
+
+	checkCmd := skillsCmd(configPath)
+	checkCmd.SilenceUsage = true
+	checkCmd.SilenceErrors = true
+	checkCmd.SetOut(io.Discard)
+	checkCmd.SetErr(io.Discard)
+	checkCmd.SetArgs([]string{"check"})
+	if err := checkCmd.Execute(); err != nil {
+		t.Fatalf("skills check should pass: %v", err)
+	}
+
+	showCmd := skillsCmd(configPath)
+	showCmd.SilenceUsage = true
+	showCmd.SilenceErrors = true
+	var showOut bytes.Buffer
+	showCmd.SetOut(&showOut)
+	showCmd.SetErr(io.Discard)
+	showCmd.SetArgs([]string{"show", "planner", "--query", "please plan this", "--json"})
+	if err := showCmd.Execute(); err != nil {
+		t.Fatalf("skills show should pass: %v", err)
+	}
+	if !strings.Contains(showOut.String(), "\"activation\"") || !strings.Contains(showOut.String(), "\"breakdown\"") {
+		t.Fatalf("expected activation breakdown in show output, got: %s", showOut.String())
 	}
 }

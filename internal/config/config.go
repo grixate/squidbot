@@ -145,6 +145,7 @@ type RuntimeConfig struct {
 	ActorIdleTTL         DurationValue            `json:"actorIdleTtl"`
 	HeartbeatIntervalSec int                      `json:"heartbeatIntervalSec"`
 	Subagents            SubagentRuntimeConfig    `json:"subagents"`
+	Federation           FederationRuntimeConfig  `json:"federation"`
 	Plugins              PluginsRuntimeConfig     `json:"plugins"`
 	MetricsHTTP          MetricsHTTPRuntimeConfig `json:"metricsHttp"`
 	TokenSafety          TokenSafetyRuntimeConfig `json:"tokenSafety"`
@@ -192,6 +193,31 @@ type TokenSafetyRuntimeConfig struct {
 	TrustedWriters              []string `json:"trustedWriters"`
 }
 
+type FederationPeerConfig struct {
+	ID             string   `json:"id"`
+	BaseURL        string   `json:"baseUrl"`
+	AuthToken      string   `json:"authToken,omitempty"`
+	Enabled        bool     `json:"enabled"`
+	Capabilities   []string `json:"capabilities,omitempty"`
+	Roles          []string `json:"roles,omitempty"`
+	Priority       int      `json:"priority"`
+	MaxConcurrent  int      `json:"maxConcurrent"`
+	MaxQueue       int      `json:"maxQueue"`
+	HealthEndpoint string   `json:"healthEndpoint,omitempty"`
+}
+
+type FederationRuntimeConfig struct {
+	Enabled           bool                   `json:"enabled"`
+	NodeID            string                 `json:"nodeId"`
+	ListenAddr        string                 `json:"listenAddr"`
+	RequestTimeoutSec int                    `json:"requestTimeoutSec"`
+	MaxRetries        int                    `json:"maxRetries"`
+	RetryBackoffMs    int                    `json:"retryBackoffMs"`
+	AllowFromNodeIDs  []string               `json:"allowFromNodeIDs,omitempty"`
+	AutoFallback      bool                   `json:"autoFallback"`
+	Peers             []FederationPeerConfig `json:"peers,omitempty"`
+}
+
 type MemoryConfig struct {
 	Enabled            bool                 `json:"enabled"`
 	IndexPath          string               `json:"indexPath"`
@@ -209,7 +235,27 @@ type MemorySemanticConfig struct {
 }
 
 type SkillsConfig struct {
-	Paths []string `json:"paths"`
+	Enabled            bool               `json:"enabled"`
+	Paths              []string           `json:"paths"`
+	MaxActive          int                `json:"maxActive"`
+	MatchThreshold     int                `json:"matchThreshold"`
+	RefreshIntervalSec int                `json:"refreshIntervalSec"`
+	PromptMaxChars     int                `json:"promptMaxChars"`
+	SkillMaxChars      int                `json:"skillMaxChars"`
+	AllowZip           bool               `json:"allowZip"`
+	CacheDir           string             `json:"cacheDir"`
+	Policy             SkillsPolicyConfig `json:"policy"`
+}
+
+type SkillsPolicyConfig struct {
+	Allow    []string                             `json:"allow"`
+	Deny     []string                             `json:"deny"`
+	Channels map[string]SkillsChannelPolicyConfig `json:"channels"`
+}
+
+type SkillsChannelPolicyConfig struct {
+	Allow []string `json:"allow"`
+	Deny  []string `json:"deny"`
 }
 
 type DurationValue struct {
@@ -360,6 +406,17 @@ func Default() Config {
 				NotifyOnComplete:   true,
 				ReinjectCompletion: false,
 			},
+			Federation: FederationRuntimeConfig{
+				Enabled:           false,
+				NodeID:            "",
+				ListenAddr:        "127.0.0.1:18900",
+				RequestTimeoutSec: 30,
+				MaxRetries:        2,
+				RetryBackoffMs:    500,
+				AllowFromNodeIDs:  []string{},
+				AutoFallback:      true,
+				Peers:             []FederationPeerConfig{},
+			},
 			Plugins: PluginsRuntimeConfig{
 				Enabled:           false,
 				Paths:             []string{filepath.Join(workspace, "plugins")},
@@ -401,7 +458,20 @@ func Default() Config {
 			},
 		},
 		Skills: SkillsConfig{
-			Paths: []string{filepath.Join(workspace, "skills")},
+			Enabled:            true,
+			Paths:              []string{filepath.Join(workspace, "skills")},
+			MaxActive:          3,
+			MatchThreshold:     35,
+			RefreshIntervalSec: 30,
+			PromptMaxChars:     12000,
+			SkillMaxChars:      4000,
+			AllowZip:           true,
+			CacheDir:           filepath.Join(workspace, ".squidbot", "skills-cache"),
+			Policy: SkillsPolicyConfig{
+				Allow:    []string{},
+				Deny:     []string{},
+				Channels: map[string]SkillsChannelPolicyConfig{},
+			},
 		},
 	}
 }
@@ -450,6 +520,7 @@ func Load(path string) (Config, error) {
 		if os.IsNotExist(err) {
 			normalizeDefaultChannels(&cfg)
 			applyEnvOverrides(&cfg)
+			normalizeSkillsConfig(&cfg)
 			return cfg, nil
 		}
 		return cfg, err
@@ -464,6 +535,7 @@ func Load(path string) (Config, error) {
 	migrateLegacyChannels(&cfg)
 	normalizeDefaultChannels(&cfg)
 	applyEnvOverrides(&cfg)
+	normalizeSkillsConfig(&cfg)
 	return cfg, nil
 }
 
@@ -491,6 +563,9 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if cfg.Channels.Plugins == nil {
 		cfg.Channels.Plugins = map[string]PluginChannelConfig{}
+	}
+	if cfg.Skills.Policy.Channels == nil {
+		cfg.Skills.Policy.Channels = map[string]SkillsChannelPolicyConfig{}
 	}
 	env := map[string]*string{
 		"SQUIDBOT_PROVIDER_ACTIVE":            &cfg.Providers.Active,
@@ -656,6 +731,44 @@ func applyEnvOverrides(cfg *Config) {
 			cfg.Skills.Paths = out
 		}
 	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_SKILLS_ENABLED")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			cfg.Skills.Enabled = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_SKILLS_MAX_ACTIVE")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.Skills.MaxActive = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_SKILLS_MATCH_THRESHOLD")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.Skills.MatchThreshold = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_SKILLS_REFRESH_INTERVAL_SEC")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.Skills.RefreshIntervalSec = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_SKILLS_PROMPT_MAX_CHARS")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.Skills.PromptMaxChars = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_SKILLS_SKILL_MAX_CHARS")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.Skills.SkillMaxChars = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_SKILLS_ALLOW_ZIP")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			cfg.Skills.AllowZip = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_SKILLS_CACHE_DIR")); value != "" {
+		cfg.Skills.CacheDir = value
+	}
 	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_SUBAGENTS_ENABLED")); value != "" {
 		parsed, err := strconv.ParseBool(value)
 		if err == nil {
@@ -714,6 +827,40 @@ func applyEnvOverrides(cfg *Config) {
 		parsed, err := strconv.ParseBool(value)
 		if err == nil {
 			cfg.Runtime.Subagents.ReinjectCompletion = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_FEDERATION_ENABLED")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			cfg.Runtime.Federation.Enabled = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_FEDERATION_NODE_ID")); value != "" {
+		cfg.Runtime.Federation.NodeID = value
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_FEDERATION_LISTEN_ADDR")); value != "" {
+		cfg.Runtime.Federation.ListenAddr = value
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_FEDERATION_REQUEST_TIMEOUT_SEC")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.Runtime.Federation.RequestTimeoutSec = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_FEDERATION_MAX_RETRIES")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed >= 0 {
+			cfg.Runtime.Federation.MaxRetries = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_FEDERATION_RETRY_BACKOFF_MS")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed >= 0 {
+			cfg.Runtime.Federation.RetryBackoffMs = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_FEDERATION_ALLOW_FROM_NODE_IDS")); value != "" {
+		cfg.Runtime.Federation.AllowFromNodeIDs = splitCSV(value)
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_FEDERATION_AUTO_FALLBACK")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			cfg.Runtime.Federation.AutoFallback = parsed
 		}
 	}
 	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_TOKEN_SAFETY_ENABLED")); value != "" {
@@ -781,6 +928,7 @@ func applyEnvOverrides(cfg *Config) {
 	migrateLegacyProviders(cfg)
 	migrateLegacyChannels(cfg)
 	normalizeDefaultChannels(cfg)
+	normalizeSkillsConfig(cfg)
 }
 
 func splitCSV(value string) []string {
@@ -794,6 +942,37 @@ func splitCSV(value string) []string {
 		out = append(out, trimmed)
 	}
 	return out
+}
+
+func normalizeSkillsConfig(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	workspace := WorkspacePath(*cfg)
+	if len(cfg.Skills.Paths) == 0 {
+		cfg.Skills.Paths = []string{filepath.Join(workspace, "skills")}
+	}
+	if cfg.Skills.MaxActive <= 0 {
+		cfg.Skills.MaxActive = 3
+	}
+	if cfg.Skills.MatchThreshold <= 0 {
+		cfg.Skills.MatchThreshold = 35
+	}
+	if cfg.Skills.RefreshIntervalSec <= 0 {
+		cfg.Skills.RefreshIntervalSec = 30
+	}
+	if cfg.Skills.PromptMaxChars <= 0 {
+		cfg.Skills.PromptMaxChars = 12000
+	}
+	if cfg.Skills.SkillMaxChars <= 0 {
+		cfg.Skills.SkillMaxChars = 4000
+	}
+	if strings.TrimSpace(cfg.Skills.CacheDir) == "" {
+		cfg.Skills.CacheDir = filepath.Join(workspace, ".squidbot", "skills-cache")
+	}
+	if cfg.Skills.Policy.Channels == nil {
+		cfg.Skills.Policy.Channels = map[string]SkillsChannelPolicyConfig{}
+	}
 }
 
 func (c Config) PrimaryProvider() (name string, provider ProviderConfig) {
