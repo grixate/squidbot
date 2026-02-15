@@ -27,6 +27,15 @@ func TestDefaultIncludesMemoryAndSkillsSettings(t *testing.T) {
 	if cfg.Management.Host != "127.0.0.1" || cfg.Management.Port != 18790 {
 		t.Fatalf("unexpected management defaults: %#v", cfg.Management)
 	}
+	if cfg.Runtime.Federation.Enabled {
+		t.Fatal("expected federation.enabled default false")
+	}
+	if cfg.Runtime.Federation.ListenAddr == "" {
+		t.Fatal("expected federation.listenAddr default")
+	}
+	if !cfg.Runtime.Federation.AutoFallback {
+		t.Fatal("expected federation.autoFallback default true")
+	}
 }
 
 func TestLoadBackfillsMissingMemoryAndSkillsFields(t *testing.T) {

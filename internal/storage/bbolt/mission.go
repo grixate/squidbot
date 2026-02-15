@@ -3,6 +3,7 @@ package bbolt
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"go.etcd.io/bbolt"
 
 	"github.com/grixate/squidbot/internal/agent"
+	"github.com/grixate/squidbot/internal/federation"
 	"github.com/grixate/squidbot/internal/mission"
 )
 
@@ -27,6 +29,14 @@ func usageDayKey(day string) string {
 
 func heartbeatRunKey(id string) string {
 	return "hbrun:" + strings.TrimSpace(id)
+}
+
+func federationRunKey(id string) string {
+	return "run:" + strings.TrimSpace(id)
+}
+
+func federationPeerHealthKey(peerID string) string {
+	return "peer:" + strings.TrimSpace(peerID)
 }
 
 func (s *Store) PutMissionTask(ctx context.Context, task mission.Task) error {
@@ -232,4 +242,108 @@ func (s *Store) ListJobRuns(_ context.Context, limit int) ([]map[string]any, err
 		return nil
 	})
 	return out, err
+}
+
+func (s *Store) PutFederationRun(ctx context.Context, run federation.DelegationRun) error {
+	bytes, err := json.Marshal(run)
+	if err != nil {
+		return err
+	}
+	return s.runWrite(ctx, func(tx *bbolt.Tx) error {
+		return tx.Bucket(bucketFederationRuns).Put([]byte(federationRunKey(run.ID)), bytes)
+	})
+}
+
+func (s *Store) GetFederationRun(_ context.Context, id string) (federation.DelegationRun, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return federation.DelegationRun{}, fmt.Errorf("run id is required")
+	}
+	var out federation.DelegationRun
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		value := tx.Bucket(bucketFederationRuns).Get([]byte(federationRunKey(id)))
+		if value == nil {
+			return fmt.Errorf("federation run not found")
+		}
+		return json.Unmarshal(value, &out)
+	})
+	return out, err
+}
+
+func (s *Store) ListFederationRuns(_ context.Context, sessionID string, status federation.DelegationStatus, limit int) ([]federation.DelegationRun, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	status = federation.DelegationStatus(strings.TrimSpace(strings.ToLower(string(status))))
+	out := make([]federation.DelegationRun, 0, 32)
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		return tx.Bucket(bucketFederationRuns).ForEach(func(_, v []byte) error {
+			var run federation.DelegationRun
+			if err := json.Unmarshal(v, &run); err != nil {
+				return nil
+			}
+			if sessionID != "" && strings.TrimSpace(run.SessionID) != sessionID {
+				return nil
+			}
+			if status != "" && run.Status != status {
+				return nil
+			}
+			out = append(out, run)
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (s *Store) PutFederationPeerHealth(ctx context.Context, health federation.PeerHealth) error {
+	bytes, err := json.Marshal(health)
+	if err != nil {
+		return err
+	}
+	return s.runWrite(ctx, func(tx *bbolt.Tx) error {
+		return tx.Bucket(bucketFederationPeerState).Put([]byte(federationPeerHealthKey(health.PeerID)), bytes)
+	})
+}
+
+func (s *Store) GetFederationPeerHealth(_ context.Context, peerID string) (federation.PeerHealth, error) {
+	peerID = strings.TrimSpace(peerID)
+	if peerID == "" {
+		return federation.PeerHealth{}, fmt.Errorf("peer id is required")
+	}
+	var out federation.PeerHealth
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		value := tx.Bucket(bucketFederationPeerState).Get([]byte(federationPeerHealthKey(peerID)))
+		if value == nil {
+			return fmt.Errorf("federation peer health not found")
+		}
+		return json.Unmarshal(value, &out)
+	})
+	return out, err
+}
+
+func (s *Store) ListFederationPeerHealth(_ context.Context, limit int) ([]federation.PeerHealth, error) {
+	out := make([]federation.PeerHealth, 0, 16)
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		return tx.Bucket(bucketFederationPeerState).ForEach(func(_, v []byte) error {
+			var health federation.PeerHealth
+			if err := json.Unmarshal(v, &health); err != nil {
+				return nil
+			}
+			out = append(out, health)
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt.After(out[j].UpdatedAt) })
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }

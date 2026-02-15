@@ -129,6 +129,7 @@ type RuntimeConfig struct {
 	MailboxSize          int           `json:"mailboxSize"`
 	ActorIdleTTL         DurationValue `json:"actorIdleTtl"`
 	HeartbeatIntervalSec int           `json:"heartbeatIntervalSec"`
+	Federation           FederationRuntimeConfig `json:"federation"`
 }
 
 type MemoryConfig struct {
@@ -138,6 +139,31 @@ type MemoryConfig struct {
 	RecencyDays        int    `json:"recencyDays"`
 	EmbeddingsProvider string `json:"embeddingsProvider"`
 	EmbeddingsModel    string `json:"embeddingsModel"`
+}
+
+type FederationPeerConfig struct {
+	ID            string   `json:"id"`
+	BaseURL       string   `json:"baseUrl"`
+	AuthToken     string   `json:"authToken,omitempty"`
+	Enabled       bool     `json:"enabled"`
+	Capabilities  []string `json:"capabilities,omitempty"`
+	Roles         []string `json:"roles,omitempty"`
+	Priority      int      `json:"priority"`
+	MaxConcurrent int      `json:"maxConcurrent"`
+	MaxQueue      int      `json:"maxQueue"`
+	HealthEndpoint string  `json:"healthEndpoint,omitempty"`
+}
+
+type FederationRuntimeConfig struct {
+	Enabled           bool                   `json:"enabled"`
+	NodeID            string                 `json:"nodeId"`
+	ListenAddr        string                 `json:"listenAddr"`
+	RequestTimeoutSec int                    `json:"requestTimeoutSec"`
+	MaxRetries        int                    `json:"maxRetries"`
+	RetryBackoffMs    int                    `json:"retryBackoffMs"`
+	AllowFromNodeIDs  []string               `json:"allowFromNodeIDs,omitempty"`
+	AutoFallback      bool                   `json:"autoFallback"`
+	Peers             []FederationPeerConfig `json:"peers,omitempty"`
 }
 
 type SkillsConfig struct {
@@ -269,6 +295,17 @@ func Default() Config {
 			MailboxSize:          64,
 			ActorIdleTTL:         DurationValue{Duration: 15 * time.Minute},
 			HeartbeatIntervalSec: 1800,
+			Federation: FederationRuntimeConfig{
+				Enabled:           false,
+				NodeID:            "",
+				ListenAddr:        "127.0.0.1:18900",
+				RequestTimeoutSec: 30,
+				MaxRetries:        2,
+				RetryBackoffMs:    500,
+				AllowFromNodeIDs:  []string{},
+				AutoFallback:      true,
+				Peers:             []FederationPeerConfig{},
+			},
 		},
 		Memory: MemoryConfig{
 			Enabled:            true,
@@ -433,10 +470,57 @@ func applyEnvOverrides(cfg *Config) {
 			cfg.Skills.Paths = out
 		}
 	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_FEDERATION_ENABLED")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			cfg.Runtime.Federation.Enabled = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_FEDERATION_NODE_ID")); value != "" {
+		cfg.Runtime.Federation.NodeID = value
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_FEDERATION_LISTEN_ADDR")); value != "" {
+		cfg.Runtime.Federation.ListenAddr = value
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_FEDERATION_REQUEST_TIMEOUT_SEC")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.Runtime.Federation.RequestTimeoutSec = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_FEDERATION_MAX_RETRIES")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed >= 0 {
+			cfg.Runtime.Federation.MaxRetries = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_FEDERATION_RETRY_BACKOFF_MS")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed >= 0 {
+			cfg.Runtime.Federation.RetryBackoffMs = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_FEDERATION_ALLOW_FROM_NODE_IDS")); value != "" {
+		cfg.Runtime.Federation.AllowFromNodeIDs = splitCSV(value)
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_FEDERATION_AUTO_FALLBACK")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			cfg.Runtime.Federation.AutoFallback = parsed
+		}
+	}
 	applyDynamicProviderEnvOverrides(cfg)
 	applyDynamicChannelEnvOverrides(cfg)
 	migrateLegacyProviders(cfg)
 	migrateLegacyChannels(cfg)
+}
+
+func splitCSV(value string) []string {
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed == "" {
+			continue
+		}
+		out = append(out, trimmed)
+	}
+	return out
 }
 
 func (c Config) PrimaryProvider() (name string, provider ProviderConfig) {

@@ -10,6 +10,7 @@
 
   const navItems = [
     { href: '/app/mission-control', label: 'Mission Control', icon: 'MC' },
+    { href: '/app/team-peers', label: 'Team/Peers', icon: 'TP' },
     { href: '/app/heartbeat', label: 'Heartbeat', icon: 'HB' },
     { href: '/app/memory', label: 'Memory', icon: 'MM' },
     { href: '/app/analytics', label: 'Analytics', icon: 'AN' },

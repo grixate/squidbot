@@ -256,6 +256,11 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/api/manage/settings/channels/", s.withManageAuth(s.handleManageSettingsChannel))
 	mux.HandleFunc("/api/manage/settings/runtime", s.withManageAuth(s.handleManageSettingsRuntime))
 	mux.HandleFunc("/api/manage/settings/password", s.withManageAuth(s.handleManageSettingsPassword))
+	mux.HandleFunc("/api/manage/federation/settings", s.withManageAuth(s.handleManageFederationSettings))
+	mux.HandleFunc("/api/manage/federation/peers", s.withManageAuth(s.handleManageFederationPeers))
+	mux.HandleFunc("/api/manage/federation/peers/", s.withManageAuth(s.handleManageFederationPeerByID))
+	mux.HandleFunc("/api/manage/federation/runs", s.withManageAuth(s.handleManageFederationRuns))
+	mux.HandleFunc("/api/manage/federation/runs/", s.withManageAuth(s.handleManageFederationRunByID))
 
 	mux.HandleFunc("/api/manage/placeholder", s.handleManagePlaceholder)
 	mux.HandleFunc("/", s.handleUI)

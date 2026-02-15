@@ -33,6 +33,8 @@ var (
 	bucketMissionColumns   = []byte("mission_columns")
 	bucketUsageDaily       = []byte("usage_daily")
 	bucketHeartbeatRuns    = []byte("heartbeat_runs")
+	bucketFederationRuns   = []byte("federation_runs")
+	bucketFederationPeerState = []byte("federation_peer_health")
 )
 
 type writeTask struct {
@@ -100,6 +102,8 @@ func (s *Store) initSchema() error {
 			bucketMissionColumns,
 			bucketUsageDaily,
 			bucketHeartbeatRuns,
+			bucketFederationRuns,
+			bucketFederationPeerState,
 		}
 		for _, b := range buckets {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {

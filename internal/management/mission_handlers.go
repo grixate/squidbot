@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/grixate/squidbot/internal/config"
+	"github.com/grixate/squidbot/internal/federation"
 	"github.com/grixate/squidbot/internal/mission"
 )
 
@@ -523,6 +524,277 @@ func (s *Server) handleManageSettingsPassword(w http.ResponseWriter, r *http.Req
 		return
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleManageFederationSettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		settings := s.mission.Settings().Federation
+		writeJSON(w, http.StatusOK, settings)
+	case http.MethodPut:
+		var req struct {
+			Enabled           *bool    `json:"enabled"`
+			NodeID            *string  `json:"nodeId"`
+			ListenAddr        *string  `json:"listenAddr"`
+			RequestTimeoutSec *int     `json:"requestTimeoutSec"`
+			MaxRetries        *int     `json:"maxRetries"`
+			RetryBackoffMs    *int     `json:"retryBackoffMs"`
+			AutoFallback      *bool    `json:"autoFallback"`
+			AllowFromNodeIDs  []string `json:"allowFromNodeIDs"`
+		}
+		if err := readJSON(r.Body, &req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		out, err := s.mission.UpdateFederationSettings(
+			r.Context(),
+			req.Enabled,
+			req.NodeID,
+			req.ListenAddr,
+			req.RequestTimeoutSec,
+			req.MaxRetries,
+			req.RetryBackoffMs,
+			req.AutoFallback,
+			req.AllowFromNodeIDs,
+		)
+		if err != nil {
+			writeManageError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, out)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleManageFederationPeers(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		peers, err := s.mission.FederationPeers(r.Context())
+		if err != nil {
+			writeManageError(w, err)
+			return
+		}
+		healthRecords, err := s.mission.FederationPeerHealth(r.Context(), max(len(peers)*4, 32))
+		if err != nil {
+			writeManageError(w, err)
+			return
+		}
+		healthByPeer := map[string]federation.PeerHealth{}
+		for _, health := range healthRecords {
+			peerID := strings.TrimSpace(health.PeerID)
+			if peerID == "" {
+				continue
+			}
+			healthByPeer[peerID] = health
+		}
+		type peerView struct {
+			ID             string   `json:"id"`
+			BaseURL        string   `json:"baseUrl"`
+			AuthTokenSet   bool     `json:"authTokenSet"`
+			Enabled        bool     `json:"enabled"`
+			Capabilities   []string `json:"capabilities,omitempty"`
+			Roles          []string `json:"roles,omitempty"`
+			Priority       int      `json:"priority"`
+			MaxConcurrent  int      `json:"maxConcurrent"`
+			MaxQueue       int      `json:"maxQueue"`
+			HealthEndpoint string   `json:"healthEndpoint,omitempty"`
+		}
+		outPeers := make([]peerView, 0, len(peers))
+		for _, peer := range peers {
+			outPeers = append(outPeers, peerView{
+				ID:             peer.ID,
+				BaseURL:        peer.BaseURL,
+				AuthTokenSet:   strings.TrimSpace(peer.AuthToken) != "",
+				Enabled:        peer.Enabled,
+				Capabilities:   peer.Capabilities,
+				Roles:          peer.Roles,
+				Priority:       peer.Priority,
+				MaxConcurrent:  peer.MaxConcurrent,
+				MaxQueue:       peer.MaxQueue,
+				HealthEndpoint: peer.HealthEndpoint,
+			})
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"peers": outPeers, "health": healthByPeer})
+	case http.MethodPost:
+		var req config.FederationPeerConfig
+		if err := readJSON(r.Body, &req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		out, err := s.mission.UpsertFederationPeer(r.Context(), req)
+		if err != nil {
+			writeManageError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, out)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleManageFederationPeerByID(w http.ResponseWriter, r *http.Request) {
+	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/manage/federation/peers/"), "/")
+	if rest == "" {
+		http.NotFound(w, r)
+		return
+	}
+	parts := strings.Split(rest, "/")
+	peerID := strings.TrimSpace(parts[0])
+	if peerID == "" {
+		http.NotFound(w, r)
+		return
+	}
+	if len(parts) > 1 && parts[1] == "test" {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		peers, err := s.mission.FederationPeers(r.Context())
+		if err != nil {
+			writeManageError(w, err)
+			return
+		}
+		var selected *config.FederationPeerConfig
+		for i := range peers {
+			if strings.EqualFold(strings.TrimSpace(peers[i].ID), peerID) {
+				selected = &peers[i]
+				break
+			}
+		}
+		if selected == nil {
+			writeManageError(w, errNotFound)
+			return
+		}
+		var req struct {
+			OriginNodeID string `json:"originNodeId"`
+		}
+		_ = readJSON(r.Body, &req)
+		out, err := s.mission.TestFederationPeer(r.Context(), *selected, req.OriginNodeID)
+		if err != nil {
+			writeManageError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
+	switch r.Method {
+	case http.MethodPatch:
+		var req struct {
+			BaseURL        *string  `json:"baseUrl,omitempty"`
+			AuthToken      *string  `json:"authToken,omitempty"`
+			Enabled        *bool    `json:"enabled,omitempty"`
+			Capabilities   []string `json:"capabilities,omitempty"`
+			Roles          []string `json:"roles,omitempty"`
+			Priority       *int     `json:"priority,omitempty"`
+			MaxConcurrent  *int     `json:"maxConcurrent,omitempty"`
+			MaxQueue       *int     `json:"maxQueue,omitempty"`
+			HealthEndpoint *string  `json:"healthEndpoint,omitempty"`
+		}
+		if err := readJSON(r.Body, &req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		peers, err := s.mission.FederationPeers(r.Context())
+		if err != nil {
+			writeManageError(w, err)
+			return
+		}
+		current := config.FederationPeerConfig{ID: peerID}
+		found := false
+		for _, peer := range peers {
+			if strings.EqualFold(strings.TrimSpace(peer.ID), peerID) {
+				current = peer
+				found = true
+				break
+			}
+		}
+		if !found {
+			writeManageError(w, errNotFound)
+			return
+		}
+		if req.BaseURL != nil {
+			current.BaseURL = strings.TrimSpace(*req.BaseURL)
+		}
+		if req.AuthToken != nil {
+			current.AuthToken = strings.TrimSpace(*req.AuthToken)
+		}
+		if req.Enabled != nil {
+			current.Enabled = *req.Enabled
+		}
+		if req.Capabilities != nil {
+			current.Capabilities = req.Capabilities
+		}
+		if req.Roles != nil {
+			current.Roles = req.Roles
+		}
+		if req.Priority != nil {
+			current.Priority = *req.Priority
+		}
+		if req.MaxConcurrent != nil {
+			current.MaxConcurrent = *req.MaxConcurrent
+		}
+		if req.MaxQueue != nil {
+			current.MaxQueue = *req.MaxQueue
+		}
+		if req.HealthEndpoint != nil {
+			current.HealthEndpoint = strings.TrimSpace(*req.HealthEndpoint)
+		}
+		out, err := s.mission.UpsertFederationPeer(r.Context(), current)
+		if err != nil {
+			writeManageError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, out)
+	case http.MethodDelete:
+		out, err := s.mission.DeleteFederationPeer(r.Context(), peerID)
+		if err != nil {
+			writeManageError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, out)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleManageFederationRuns(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	sessionID := strings.TrimSpace(r.URL.Query().Get("session"))
+	status := federation.DelegationStatus(strings.TrimSpace(strings.ToLower(r.URL.Query().Get("status"))))
+	limit := 100
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+	runs, err := s.mission.FederationRuns(r.Context(), sessionID, status, limit)
+	if err != nil {
+		writeManageError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"runs": runs})
+}
+
+func (s *Server) handleManageFederationRunByID(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	runID := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/manage/federation/runs/"), "/")
+	if runID == "" {
+		http.NotFound(w, r)
+		return
+	}
+	run, err := s.mission.FederationRun(r.Context(), runID)
+	if err != nil {
+		writeManageError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, run)
 }
 
 func writeManageError(w http.ResponseWriter, err error) {

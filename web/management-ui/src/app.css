@@ -327,6 +327,46 @@ hr {
   background: #10182b;
 }
 
+.peer-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.peer-card {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px;
+  background: #10182b;
+}
+
+.peer-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.run-link {
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  padding: 0;
+}
+
+.run-output {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #0e1524;
+  padding: 10px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .logs-table-wrap {
   width: 100%;
   overflow-x: auto;
@@ -372,7 +412,8 @@ td {
   .split-grid,
   .stat-grid,
   .kanban,
-  .kv-grid {
+  .kv-grid,
+  .peer-grid {
     grid-template-columns: 1fr;
   }
 }

@@ -4,9 +4,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -14,6 +17,7 @@ import (
 	"time"
 
 	"github.com/grixate/squidbot/internal/config"
+	"github.com/grixate/squidbot/internal/federation"
 	"github.com/grixate/squidbot/internal/memory"
 	"github.com/grixate/squidbot/internal/mission"
 	storepkg "github.com/grixate/squidbot/internal/storage/bbolt"
@@ -109,6 +113,16 @@ type ConfigSnapshot struct {
 		HeartbeatIntervalSec int `json:"heartbeatIntervalSec"`
 		MailboxSize          int `json:"mailboxSize"`
 	} `json:"runtime"`
+	Federation struct {
+		Enabled           bool     `json:"enabled"`
+		NodeID            string   `json:"nodeId"`
+		ListenAddr        string   `json:"listenAddr"`
+		RequestTimeoutSec int      `json:"requestTimeoutSec"`
+		MaxRetries        int      `json:"maxRetries"`
+		RetryBackoffMs    int      `json:"retryBackoffMs"`
+		AutoFallback      bool     `json:"autoFallback"`
+		AllowFromNodeIDs  []string `json:"allowFromNodeIDs"`
+	} `json:"federation"`
 	Management struct {
 		Host           string `json:"host"`
 		Port           int    `json:"port"`
@@ -867,11 +881,198 @@ func (s *MissionControlService) Settings() ConfigSnapshot {
 	out.Channels.Telegram.AllowFrom = cfg.Channels.Telegram.AllowFrom
 	out.Runtime.HeartbeatIntervalSec = cfg.Runtime.HeartbeatIntervalSec
 	out.Runtime.MailboxSize = cfg.Runtime.MailboxSize
+	out.Federation.Enabled = cfg.Runtime.Federation.Enabled
+	out.Federation.NodeID = cfg.Runtime.Federation.NodeID
+	out.Federation.ListenAddr = cfg.Runtime.Federation.ListenAddr
+	out.Federation.RequestTimeoutSec = cfg.Runtime.Federation.RequestTimeoutSec
+	out.Federation.MaxRetries = cfg.Runtime.Federation.MaxRetries
+	out.Federation.RetryBackoffMs = cfg.Runtime.Federation.RetryBackoffMs
+	out.Federation.AutoFallback = cfg.Runtime.Federation.AutoFallback
+	out.Federation.AllowFromNodeIDs = append([]string(nil), cfg.Runtime.Federation.AllowFromNodeIDs...)
 	out.Management.Host = cfg.Management.Host
 	out.Management.Port = cfg.Management.Port
 	out.Management.PublicBaseURL = cfg.Management.PublicBaseURL
 	out.Management.ServeInGateway = cfg.Management.ServeInGateway
 	return out
+}
+
+func (s *MissionControlService) FederationPeers(ctx context.Context) ([]config.FederationPeerConfig, error) {
+	_ = ctx
+	cfg := s.getConfig()
+	peers := make([]config.FederationPeerConfig, len(cfg.Runtime.Federation.Peers))
+	copy(peers, cfg.Runtime.Federation.Peers)
+	sort.Slice(peers, func(i, j int) bool {
+		if peers[i].Priority == peers[j].Priority {
+			return strings.ToLower(strings.TrimSpace(peers[i].ID)) < strings.ToLower(strings.TrimSpace(peers[j].ID))
+		}
+		return peers[i].Priority < peers[j].Priority
+	})
+	return peers, nil
+}
+
+func (s *MissionControlService) FederationPeerHealth(ctx context.Context, limit int) ([]federation.PeerHealth, error) {
+	return s.store.ListFederationPeerHealth(ctx, limit)
+}
+
+func (s *MissionControlService) UpdateFederationSettings(ctx context.Context, enabled *bool, nodeID, listenAddr *string, requestTimeoutSec, maxRetries, retryBackoffMs *int, autoFallback *bool, allowFromNodeIDs []string) (map[string]any, error) {
+	_ = ctx
+	cfg := s.getConfig()
+	if enabled != nil {
+		cfg.Runtime.Federation.Enabled = *enabled
+	}
+	if nodeID != nil {
+		cfg.Runtime.Federation.NodeID = strings.TrimSpace(*nodeID)
+	}
+	if listenAddr != nil {
+		cfg.Runtime.Federation.ListenAddr = strings.TrimSpace(*listenAddr)
+	}
+	if requestTimeoutSec != nil {
+		if *requestTimeoutSec <= 0 {
+			return nil, fmt.Errorf("requestTimeoutSec must be > 0")
+		}
+		cfg.Runtime.Federation.RequestTimeoutSec = *requestTimeoutSec
+	}
+	if maxRetries != nil {
+		if *maxRetries < 0 {
+			return nil, fmt.Errorf("maxRetries must be >= 0")
+		}
+		cfg.Runtime.Federation.MaxRetries = *maxRetries
+	}
+	if retryBackoffMs != nil {
+		if *retryBackoffMs < 0 {
+			return nil, fmt.Errorf("retryBackoffMs must be >= 0")
+		}
+		cfg.Runtime.Federation.RetryBackoffMs = *retryBackoffMs
+	}
+	if autoFallback != nil {
+		cfg.Runtime.Federation.AutoFallback = *autoFallback
+	}
+	if allowFromNodeIDs != nil {
+		out := make([]string, 0, len(allowFromNodeIDs))
+		for _, id := range allowFromNodeIDs {
+			trimmed := strings.TrimSpace(id)
+			if trimmed != "" {
+				out = append(out, trimmed)
+			}
+		}
+		cfg.Runtime.Federation.AllowFromNodeIDs = out
+	}
+	if err := s.saveConfig(cfg); err != nil {
+		return nil, err
+	}
+	return map[string]any{"ok": true, "restartRequired": true}, nil
+}
+
+func (s *MissionControlService) UpsertFederationPeer(ctx context.Context, peer config.FederationPeerConfig) (map[string]any, error) {
+	_ = ctx
+	peer.ID = strings.TrimSpace(peer.ID)
+	peer.BaseURL = strings.TrimSpace(peer.BaseURL)
+	peer.HealthEndpoint = strings.TrimSpace(peer.HealthEndpoint)
+	if peer.ID == "" {
+		return nil, fmt.Errorf("peer id is required")
+	}
+	if peer.BaseURL == "" {
+		return nil, fmt.Errorf("peer baseUrl is required")
+	}
+	peer.Capabilities = federation.NormalizeCapabilityList(peer.Capabilities)
+	peer.Roles = federation.NormalizeCapabilityList(peer.Roles)
+	cfg := s.getConfig()
+	updated := false
+	for i := range cfg.Runtime.Federation.Peers {
+		if strings.EqualFold(strings.TrimSpace(cfg.Runtime.Federation.Peers[i].ID), peer.ID) {
+			cfg.Runtime.Federation.Peers[i] = peer
+			updated = true
+			break
+		}
+	}
+	if !updated {
+		cfg.Runtime.Federation.Peers = append(cfg.Runtime.Federation.Peers, peer)
+	}
+	if err := s.saveConfig(cfg); err != nil {
+		return nil, err
+	}
+	return map[string]any{"ok": true, "updated": updated, "restartRequired": true}, nil
+}
+
+func (s *MissionControlService) DeleteFederationPeer(ctx context.Context, peerID string) (map[string]any, error) {
+	_ = ctx
+	peerID = strings.TrimSpace(peerID)
+	if peerID == "" {
+		return nil, fmt.Errorf("peer id is required")
+	}
+	cfg := s.getConfig()
+	peers := make([]config.FederationPeerConfig, 0, len(cfg.Runtime.Federation.Peers))
+	removed := false
+	for _, peer := range cfg.Runtime.Federation.Peers {
+		if strings.EqualFold(strings.TrimSpace(peer.ID), peerID) {
+			removed = true
+			continue
+		}
+		peers = append(peers, peer)
+	}
+	if !removed {
+		return nil, errNotFound
+	}
+	cfg.Runtime.Federation.Peers = peers
+	if err := s.saveConfig(cfg); err != nil {
+		return nil, err
+	}
+	return map[string]any{"ok": true, "restartRequired": true}, nil
+}
+
+func (s *MissionControlService) TestFederationPeer(ctx context.Context, peer config.FederationPeerConfig, originNodeID string) (map[string]any, error) {
+	peer.ID = strings.TrimSpace(peer.ID)
+	peer.BaseURL = strings.TrimSpace(peer.BaseURL)
+	if peer.ID == "" || peer.BaseURL == "" {
+		return nil, fmt.Errorf("peer id and baseUrl are required")
+	}
+	nodeID := strings.TrimSpace(originNodeID)
+	if nodeID == "" {
+		nodeID = "mission-control"
+	}
+	healthURL := strings.TrimRight(peer.BaseURL, "/") + "/api/federation/health"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, healthURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-Squidbot-Node-ID", nodeID)
+	if token := strings.TrimSpace(peer.AuthToken); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	started := time.Now()
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return map[string]any{
+			"ok":         false,
+			"statusCode": resp.StatusCode,
+			"error":      strings.TrimSpace(string(body)),
+		}, nil
+	}
+	var health federation.PeerHealth
+	_ = json.Unmarshal(body, &health)
+	health.PeerID = peer.ID
+	health.ResponseTime = time.Since(started).Milliseconds()
+	health.UpdatedAt = time.Now().UTC()
+	_ = s.store.PutFederationPeerHealth(context.Background(), health)
+	return map[string]any{
+		"ok":         true,
+		"statusCode": resp.StatusCode,
+		"responseMs": health.ResponseTime,
+		"health":     health,
+	}, nil
+}
+
+func (s *MissionControlService) FederationRuns(ctx context.Context, sessionID string, status federation.DelegationStatus, limit int) ([]federation.DelegationRun, error) {
+	return s.store.ListFederationRuns(ctx, sessionID, status, limit)
+}
+
+func (s *MissionControlService) FederationRun(ctx context.Context, runID string) (federation.DelegationRun, error) {
+	return s.store.GetFederationRun(ctx, runID)
 }
 
 func (s *MissionControlService) TestProvider(ctx context.Context, providerName string, draft config.ProviderConfig) error {
