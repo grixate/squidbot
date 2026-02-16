@@ -65,6 +65,8 @@ type Engine struct {
 	federationClient    *federation.Client
 	fedCancelMu         sync.Mutex
 	fedCancels          map[string]context.CancelFunc
+	closeOnce           sync.Once
+	closeErr            error
 	ulidMu              sync.Mutex
 	stateMu             sync.RWMutex
 	tokenSafetyMu       sync.Mutex
@@ -146,13 +148,38 @@ func (e *Engine) EmitOutbound(channel, chatID, content string, metadata map[stri
 }
 
 func (e *Engine) Close() error {
-	if e.subagents != nil {
-		e.subagents.Stop()
+	if e == nil {
+		return nil
 	}
-	if e.plugins != nil {
-		_ = e.plugins.Close()
+	e.closeOnce.Do(func() {
+		e.cancelFederationRuns()
+		if e.subagents != nil {
+			e.subagents.Stop()
+		}
+		if e.plugins != nil {
+			_ = e.plugins.Close()
+		}
+		e.closeErr = e.actors.Stop()
+	})
+	return e.closeErr
+}
+
+func (e *Engine) cancelFederationRuns() {
+	if e == nil {
+		return
 	}
-	return e.actors.Stop()
+	e.fedCancelMu.Lock()
+	cancels := make([]context.CancelFunc, 0, len(e.fedCancels))
+	for id, cancel := range e.fedCancels {
+		if cancel != nil {
+			cancels = append(cancels, cancel)
+		}
+		delete(e.fedCancels, id)
+	}
+	e.fedCancelMu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
 }
 
 func (e *Engine) Submit(ctx context.Context, msg InboundMessage) (Ack, error) {

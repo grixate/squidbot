@@ -465,13 +465,6 @@ func (e *Engine) executeFederationRun(runID string) {
 	run.Status = federation.StatusRunning
 	run.Attempt++
 	run.StartedAt = &startedAt
-	_ = e.store.PutFederationRun(ctx, run)
-	_ = e.store.AppendFederationEvent(ctx, federation.Event{
-		RunID:     run.ID,
-		Status:    run.Status,
-		Message:   "delegation started",
-		CreatedAt: startedAt,
-	})
 	timeout := time.Duration(max(run.TimeoutSec, 1)) * time.Second
 	runCtx, cancel := context.WithTimeout(context.Background(), timeout)
 	e.fedCancelMu.Lock()
@@ -483,6 +476,13 @@ func (e *Engine) executeFederationRun(runID string) {
 		delete(e.fedCancels, run.ID)
 		e.fedCancelMu.Unlock()
 	}()
+	_ = e.store.PutFederationRun(ctx, run)
+	_ = e.store.AppendFederationEvent(ctx, federation.Event{
+		RunID:     run.ID,
+		Status:    run.Status,
+		Message:   "delegation started",
+		CreatedAt: startedAt,
+	})
 	artifactDir := filepath.Join(config.WorkspacePath(e.currentConfig()), ".squidbot", "federation", run.ID)
 	_ = os.MkdirAll(artifactDir, 0o755)
 	result, runErr := e.runSubtask(runCtx, subagent.Run{

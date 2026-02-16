@@ -13,6 +13,7 @@ import (
 	"github.com/grixate/squidbot/internal/federation"
 )
 
+const federationRunOwnershipError = "forbidden: run belongs to a different origin node"
 func (r *Runtime) startFederationHTTP(ctx context.Context) error {
 	if r == nil || r.Engine == nil {
 		return nil
@@ -27,7 +28,7 @@ func (r *Runtime) startFederationHTTP(ctx context.Context) error {
 	}
 	listenFn := r.federationListen
 	if listenFn == nil {
-		listenFn = net.Listen
+		listenFn = netListen
 	}
 	listener, err := listenFn("tcp", listenAddr)
 	if err != nil {
@@ -40,7 +41,9 @@ func (r *Runtime) startFederationHTTP(ctx context.Context) error {
 	r.federationSrv = &http.Server{Addr: listenAddr, Handler: mux}
 	go func() {
 		<-ctx.Done()
-		_ = r.federationSrv.Shutdown(context.Background())
+		if r.federationSrv != nil {
+			_ = r.federationSrv.Shutdown(context.Background())
+		}
 	}()
 	go func() {
 		if err := r.federationSrv.Serve(listener); err != nil && err != http.ErrServerClosed {
@@ -171,14 +174,25 @@ func (r *Runtime) handleFederationDelegationByID(w http.ResponseWriter, req *htt
 		http.NotFound(w, req)
 		return
 	}
+	authorizeRun := func() (federation.DelegationRun, bool) {
+		run, err := r.Engine.FederationStatus(req.Context(), runID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return federation.DelegationRun{}, false
+		}
+		if !strings.EqualFold(strings.TrimSpace(run.OriginNodeID), strings.TrimSpace(originNodeID)) {
+			http.Error(w, federationRunOwnershipError, http.StatusForbidden)
+			return federation.DelegationRun{}, false
+		}
+		return run, true
+	}
 	if len(parts) == 1 {
 		if req.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		run, err := r.Engine.FederationStatus(req.Context(), runID)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusNotFound)
+		run, ok := authorizeRun()
+		if !ok {
 			return
 		}
 		writeFederationJSON(w, http.StatusOK, run)
@@ -189,6 +203,9 @@ func (r *Runtime) handleFederationDelegationByID(w http.ResponseWriter, req *htt
 	case "result":
 		if req.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if _, ok := authorizeRun(); !ok {
 			return
 		}
 		run, err := r.Engine.FederationResult(req.Context(), runID)
@@ -202,6 +219,9 @@ func (r *Runtime) handleFederationDelegationByID(w http.ResponseWriter, req *htt
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		if _, ok := authorizeRun(); !ok {
+			return
+		}
 		run, err := r.Engine.FederationCancel(req.Context(), runID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -211,6 +231,10 @@ func (r *Runtime) handleFederationDelegationByID(w http.ResponseWriter, req *htt
 	default:
 		http.NotFound(w, req)
 	}
+}
+
+var netListen = func(network, address string) (net.Listener, error) {
+	return net.Listen(network, address)
 }
 
 func writeFederationJSON(w http.ResponseWriter, status int, payload any) {

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 	"time"
 
@@ -69,8 +70,31 @@ func (c *Client) Cancel(ctx context.Context, peer config.FederationPeerConfig, r
 
 func (c *Client) Health(ctx context.Context, peer config.FederationPeerConfig, originNodeID string) (PeerHealth, error) {
 	var out PeerHealth
-	err := c.doJSON(ctx, peer, http.MethodGet, "/api/federation/health", originNodeID, "", nil, &out)
+	err := c.doJSON(ctx, peer, http.MethodGet, normalizeHealthEndpoint(peer.HealthEndpoint), originNodeID, "", nil, &out)
 	return out, err
+}
+
+func normalizeHealthEndpoint(raw string) string {
+	fallback := "/api/federation/health"
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return fallback
+	}
+	lower := strings.ToLower(trimmed)
+	if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") || strings.HasPrefix(trimmed, "//") {
+		return fallback
+	}
+	if !strings.HasPrefix(trimmed, "/") {
+		trimmed = "/" + trimmed
+	}
+	clean := path.Clean(trimmed)
+	if clean == "." {
+		return fallback
+	}
+	if !strings.HasPrefix(clean, "/") {
+		clean = "/" + clean
+	}
+	return clean
 }
 
 func (c *Client) doJSON(ctx context.Context, peer config.FederationPeerConfig, method, path, originNodeID, idempotencyKey string, payload any, out any) error {

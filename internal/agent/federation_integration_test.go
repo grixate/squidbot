@@ -156,3 +156,36 @@ func TestFederationCancelTransitionsRun(t *testing.T) {
 		t.Fatalf("expected terminal cancelled status, got %s", waited.Status)
 	}
 }
+
+func TestEngineCloseCancelsFederationRuns(t *testing.T) {
+	engine, store, _ := newFederationTestEngine(t, &federationBlockingProvider{})
+	req := federation.DelegationRequest{
+		Task: "close should cancel this run",
+		Context: federation.ContextPacket{
+			Mode:      "session",
+			CreatedAt: time.Now().UTC(),
+		},
+	}
+	run, err := engine.FederationSubmit(context.Background(), req, "origin-close", "idem-close")
+	if err != nil {
+		t.Fatalf("submit failed: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		current, getErr := store.GetFederationRun(context.Background(), run.ID)
+		if getErr == nil && current.Status == federation.StatusRunning {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if err := engine.Close(); err != nil {
+		t.Fatalf("engine close failed: %v", err)
+	}
+
+	waited := waitForFederationTerminal(t, store, run.ID, 3*time.Second)
+	if waited.Status != federation.StatusCancelled {
+		t.Fatalf("expected terminal cancelled status after close, got %s", waited.Status)
+	}
+}
