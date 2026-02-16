@@ -48,6 +48,7 @@ I am squidbot.
 - web_fetch(url, extractMode?, maxChars?)
 - message(content, channel?, chat_id?)
 - spawn(task, label?, context_mode?, attachments?, timeout_sec?, max_attempts?, wait?)
+- subagent_list(status?, limit?)
 - subagent_wait(run_ids, timeout_sec?)
 - subagent_status(run_id)
 - subagent_result(run_id)

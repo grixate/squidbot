@@ -738,6 +738,11 @@ func (e *Engine) buildRegistry(msg InboundMessage) (*tools.Registry, error) {
 	spawnTool := tools.NewSpawnTool(e.spawnSubtask)
 	spawnTool.SetContext(msg.SessionID, msg.Channel, msg.ChatID, msg.SenderID, subagentDepthFromMetadata(msg.Metadata))
 	registry.Register(spawnTool)
+
+	listTool := tools.NewSubagentListTool(e.listSubtasks)
+	listTool.SetContext(msg.SessionID)
+	registry.Register(listTool)
+
 	waitTool := tools.NewSubagentWaitTool(e.waitSubtasks)
 	waitTool.SetContext(msg.SessionID)
 	registry.Register(waitTool)
@@ -952,6 +957,64 @@ func (e *Engine) waitSubtasks(ctx context.Context, req tools.SubagentWaitRequest
 		return tools.SubagentWaitResponse{}, err
 	}
 	return tools.SubagentWaitResponse{Runs: runs}, nil
+}
+
+func (e *Engine) listSubtasks(ctx context.Context, req tools.SubagentListRequest) (tools.SubagentListResponse, error) {
+	if e.subagents == nil {
+		return tools.SubagentListResponse{}, fmt.Errorf("subagent manager is not configured")
+	}
+
+	limit := req.Limit
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 200 {
+		limit = 200
+	}
+
+	runs, err := e.subagents.ListSessionRuns(ctx, req.SessionID, 0)
+	if err != nil {
+		return tools.SubagentListResponse{}, err
+	}
+
+	statusFilter, filterActive, err := normalizeSubagentListFilter(req.Status)
+	if err != nil {
+		return tools.SubagentListResponse{}, err
+	}
+	filtered := make([]subagent.Run, 0, len(runs))
+	for _, run := range runs {
+		if filterActive {
+			if run.Status != subagent.StatusQueued && run.Status != subagent.StatusRunning {
+				continue
+			}
+		} else if statusFilter != "" && run.Status != statusFilter {
+			continue
+		}
+		filtered = append(filtered, run)
+	}
+	if len(filtered) > limit {
+		filtered = filtered[:limit]
+	}
+	return tools.SubagentListResponse{Runs: filtered}, nil
+}
+
+func normalizeSubagentListFilter(raw string) (subagent.Status, bool, error) {
+	value := strings.TrimSpace(strings.ToLower(raw))
+	switch value {
+	case "", "all":
+		return "", false, nil
+	case "active":
+		return "", true, nil
+	case string(subagent.StatusQueued),
+		string(subagent.StatusRunning),
+		string(subagent.StatusSucceeded),
+		string(subagent.StatusFailed),
+		string(subagent.StatusTimedOut),
+		string(subagent.StatusCancelled):
+		return subagent.Status(value), false, nil
+	default:
+		return "", false, fmt.Errorf("unsupported status %q", raw)
+	}
 }
 
 func (e *Engine) statusSubtask(ctx context.Context, req tools.SubagentStatusRequest) (tools.SubagentStatusResponse, error) {
