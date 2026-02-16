@@ -3,6 +3,8 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -11,17 +13,25 @@ import (
 	"github.com/grixate/squidbot/internal/federation"
 )
 
-func (r *Runtime) startFederationHTTP(ctx context.Context) {
+func (r *Runtime) startFederationHTTP(ctx context.Context) error {
 	if r == nil || r.Engine == nil {
-		return
+		return nil
 	}
 	cfg := r.Config
 	if !cfg.Runtime.Federation.Enabled {
-		return
+		return nil
 	}
 	listenAddr := strings.TrimSpace(cfg.Runtime.Federation.ListenAddr)
 	if listenAddr == "" {
-		return
+		return nil
+	}
+	listenFn := r.federationListen
+	if listenFn == nil {
+		listenFn = net.Listen
+	}
+	listener, err := listenFn("tcp", listenAddr)
+	if err != nil {
+		return fmt.Errorf("federation listen failed on %s: %w", listenAddr, err)
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/federation/health", r.handleFederationHealth)
@@ -33,7 +43,7 @@ func (r *Runtime) startFederationHTTP(ctx context.Context) {
 		_ = r.federationSrv.Shutdown(context.Background())
 	}()
 	go func() {
-		if err := r.federationSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := r.federationSrv.Serve(listener); err != nil && err != http.ErrServerClosed {
 			r.log.Printf("federation http stopped: %v", err)
 		}
 	}()
@@ -50,6 +60,7 @@ func (r *Runtime) startFederationHTTP(ctx context.Context) {
 			}
 		}
 	}()
+	return nil
 }
 
 func (r *Runtime) federationAuth(req *http.Request) (string, int, string) {
