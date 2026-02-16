@@ -175,6 +175,40 @@ Run without touching `~/.squidbot`:
 
 ---
 
+## Adaptive Context Control (Optional)
+
+When `contextControl.enabled` is true, Squidbot can adapt prompt assembly for smaller context windows:
+
+- model-window lookup from `workspace/.squidbot/model-windows.json`
+- staged compression at configured thresholds
+- optional session-summary persistence for long threads
+
+Model window registry format:
+
+```json
+{
+  "version": 1,
+  "defaults": {
+    "contextWindowTokens": 8192,
+    "outputReserveTokens": 1024,
+    "charsPerToken": 4.0
+  },
+  "models": [
+    {
+      "name": "gemma3:4b",
+      "aliases": ["gemma-3-4b", "google/gemma-3-4b-it"],
+      "contextWindowTokens": 8192,
+      "outputReserveTokens": 1024,
+      "charsPerToken": 3.6
+    }
+  ]
+}
+```
+
+The file is checked every request and reloaded when its mtime changes.
+
+---
+
 ## Persistence Model
 
 | Layer | Location | Purpose |

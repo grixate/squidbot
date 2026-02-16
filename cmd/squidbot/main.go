@@ -229,6 +229,19 @@ func statusCmd(configPath string) *cobra.Command {
 				cfg.Memory.Semantic.Enabled, cfg.Memory.Semantic.TopKCandidates, cfg.Memory.Semantic.RerankTopK)
 			fmt.Printf("Skills runtime: enabled=%v paths=%d maxActive=%d allowZip=%v refreshSec=%d\n",
 				cfg.Skills.Enabled, len(cfg.Skills.Paths), cfg.Skills.MaxActive, cfg.Skills.AllowZip, cfg.Skills.RefreshIntervalSec)
+			fmt.Printf("Context control: enabled=%v registry=%s defaultWindow=%d outputReserve=%d stages=%d/%d/%d history=%d..%d summary=%v(%s)\n",
+				cfg.ContextControl.Enabled,
+				cfg.ContextControl.RegistryPath,
+				cfg.ContextControl.DefaultWindowTokens,
+				cfg.ContextControl.OutputReserveTokens,
+				cfg.ContextControl.Stage1Pct,
+				cfg.ContextControl.Stage2Pct,
+				cfg.ContextControl.Stage3Pct,
+				cfg.ContextControl.MinHistoryTurns,
+				cfg.ContextControl.MaxHistoryTurns,
+				cfg.ContextControl.Summary.Enabled,
+				cfg.ContextControl.Summary.Method,
+			)
 			return nil
 		},
 	}

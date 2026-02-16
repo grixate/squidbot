@@ -14,17 +14,18 @@ import (
 )
 
 type Config struct {
-	Agents    AgentsConfig    `json:"agents"`
-	Providers ProvidersConfig `json:"providers"`
-	Channels  ChannelsConfig  `json:"channels"`
-	Tools     ToolsConfig     `json:"tools"`
-	Features  FeaturesConfig  `json:"features"`
-	Gateway   GatewayConfig   `json:"gateway"`
-	Auth      AuthConfig      `json:"auth"`
-	Storage   StorageConfig   `json:"storage"`
-	Runtime   RuntimeConfig   `json:"runtime"`
-	Memory    MemoryConfig    `json:"memory"`
-	Skills    SkillsConfig    `json:"skills"`
+	Agents         AgentsConfig         `json:"agents"`
+	Providers      ProvidersConfig      `json:"providers"`
+	Channels       ChannelsConfig       `json:"channels"`
+	Tools          ToolsConfig          `json:"tools"`
+	Features       FeaturesConfig       `json:"features"`
+	Gateway        GatewayConfig        `json:"gateway"`
+	Auth           AuthConfig           `json:"auth"`
+	Storage        StorageConfig        `json:"storage"`
+	Runtime        RuntimeConfig        `json:"runtime"`
+	Memory         MemoryConfig         `json:"memory"`
+	Skills         SkillsConfig         `json:"skills"`
+	ContextControl ContextControlConfig `json:"contextControl"`
 }
 
 type AgentsConfig struct {
@@ -266,6 +267,30 @@ type SkillsChannelPolicyConfig struct {
 	Deny  []string `json:"deny"`
 }
 
+type ContextControlConfig struct {
+	Enabled                  bool                        `json:"enabled"`
+	RegistryPath             string                      `json:"registryPath"`
+	DefaultWindowTokens      int                         `json:"defaultWindowTokens"`
+	OutputReserveTokens      int                         `json:"outputReserveTokens"`
+	Stage1Pct                int                         `json:"stage1Pct"`
+	Stage2Pct                int                         `json:"stage2Pct"`
+	Stage3Pct                int                         `json:"stage3Pct"`
+	MaxHistoryTurns          int                         `json:"maxHistoryTurns"`
+	MinHistoryTurns          int                         `json:"minHistoryTurns"`
+	BootstrapMaxChars        int                         `json:"bootstrapMaxChars"`
+	MemorySnippetMaxChars    int                         `json:"memorySnippetMaxChars"`
+	SkillPromptMaxChars      int                         `json:"skillPromptMaxChars"`
+	ContextOverflowRetryOnce bool                        `json:"contextOverflowRetryOnce"`
+	Summary                  ContextControlSummaryConfig `json:"summary"`
+}
+
+type ContextControlSummaryConfig struct {
+	Enabled        bool   `json:"enabled"`
+	Method         string `json:"method"`
+	MaxInputTurns  int    `json:"maxInputTurns"`
+	MaxOutputChars int    `json:"maxOutputChars"`
+}
+
 type DurationValue struct {
 	time.Duration
 }
@@ -487,6 +512,27 @@ func Default() Config {
 				Channels: map[string]SkillsChannelPolicyConfig{},
 			},
 		},
+		ContextControl: ContextControlConfig{
+			Enabled:                  false,
+			RegistryPath:             filepath.Join(workspace, ".squidbot", "model-windows.json"),
+			DefaultWindowTokens:      8192,
+			OutputReserveTokens:      1024,
+			Stage1Pct:                70,
+			Stage2Pct:                82,
+			Stage3Pct:                90,
+			MaxHistoryTurns:          50,
+			MinHistoryTurns:          8,
+			BootstrapMaxChars:        5000,
+			MemorySnippetMaxChars:    360,
+			SkillPromptMaxChars:      12000,
+			ContextOverflowRetryOnce: true,
+			Summary: ContextControlSummaryConfig{
+				Enabled:        true,
+				Method:         "model_written",
+				MaxInputTurns:  24,
+				MaxOutputChars: 1800,
+			},
+		},
 	}
 }
 
@@ -535,6 +581,7 @@ func Load(path string) (Config, error) {
 			normalizeDefaultChannels(&cfg)
 			applyEnvOverrides(&cfg)
 			normalizeSkillsConfig(&cfg)
+			normalizeContextControlConfig(&cfg)
 			return cfg, nil
 		}
 		return cfg, err
@@ -550,6 +597,7 @@ func Load(path string) (Config, error) {
 	normalizeDefaultChannels(&cfg)
 	applyEnvOverrides(&cfg)
 	normalizeSkillsConfig(&cfg)
+	normalizeContextControlConfig(&cfg)
 	return cfg, nil
 }
 
@@ -957,6 +1005,82 @@ func applyEnvOverrides(cfg *Config) {
 	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_TOKEN_SAFETY_TRUSTED_WRITERS")); value != "" {
 		cfg.Runtime.TokenSafety.TrustedWriters = splitCSV(value)
 	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_CONTEXT_CONTROL_ENABLED")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			cfg.ContextControl.Enabled = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_CONTEXT_CONTROL_REGISTRY_PATH")); value != "" {
+		cfg.ContextControl.RegistryPath = value
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_CONTEXT_CONTROL_DEFAULT_WINDOW_TOKENS")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.ContextControl.DefaultWindowTokens = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_CONTEXT_CONTROL_OUTPUT_RESERVE_TOKENS")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.ContextControl.OutputReserveTokens = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_CONTEXT_CONTROL_STAGE1_PCT")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.ContextControl.Stage1Pct = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_CONTEXT_CONTROL_STAGE2_PCT")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.ContextControl.Stage2Pct = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_CONTEXT_CONTROL_STAGE3_PCT")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.ContextControl.Stage3Pct = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_CONTEXT_CONTROL_MAX_HISTORY_TURNS")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.ContextControl.MaxHistoryTurns = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_CONTEXT_CONTROL_MIN_HISTORY_TURNS")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.ContextControl.MinHistoryTurns = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_CONTEXT_CONTROL_BOOTSTRAP_MAX_CHARS")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.ContextControl.BootstrapMaxChars = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_CONTEXT_CONTROL_MEMORY_SNIPPET_MAX_CHARS")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.ContextControl.MemorySnippetMaxChars = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_CONTEXT_CONTROL_SKILL_PROMPT_MAX_CHARS")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.ContextControl.SkillPromptMaxChars = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_CONTEXT_CONTROL_SUMMARY_ENABLED")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			cfg.ContextControl.Summary.Enabled = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_CONTEXT_CONTROL_SUMMARY_METHOD")); value != "" {
+		cfg.ContextControl.Summary.Method = strings.ToLower(strings.TrimSpace(value))
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_CONTEXT_CONTROL_SUMMARY_MAX_INPUT_TURNS")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.ContextControl.Summary.MaxInputTurns = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_CONTEXT_CONTROL_SUMMARY_MAX_OUTPUT_CHARS")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.ContextControl.Summary.MaxOutputChars = parsed
+		}
+	}
 	applyDynamicProviderEnvOverrides(cfg)
 	applyDynamicChannelEnvOverrides(cfg)
 	migrateLegacyProviders(cfg)
@@ -964,6 +1088,7 @@ func applyEnvOverrides(cfg *Config) {
 	normalizeDefaultChannels(cfg)
 	normalizeSkillsConfig(cfg)
 	normalizeCronRuntimeConfig(cfg)
+	normalizeContextControlConfig(cfg)
 }
 
 func splitCSV(value string) []string {
@@ -977,6 +1102,13 @@ func splitCSV(value string) []string {
 		out = append(out, trimmed)
 	}
 	return out
+}
+
+func maxInt(v, floor int) int {
+	if v < floor {
+		return floor
+	}
+	return v
 }
 
 func normalizeSkillsConfig(cfg *Config) {
@@ -1022,6 +1154,77 @@ func normalizeCronRuntimeConfig(cfg *Config) {
 	}
 	if cfg.Runtime.Cron.MaxQueue <= 0 {
 		cfg.Runtime.Cron.MaxQueue = 128
+	}
+}
+
+func normalizeContextControlConfig(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	workspace := WorkspacePath(*cfg)
+	if strings.TrimSpace(cfg.ContextControl.RegistryPath) == "" {
+		cfg.ContextControl.RegistryPath = filepath.Join(workspace, ".squidbot", "model-windows.json")
+	}
+	if !filepath.IsAbs(cfg.ContextControl.RegistryPath) {
+		cfg.ContextControl.RegistryPath = filepath.Join(workspace, cfg.ContextControl.RegistryPath)
+	}
+	if cfg.ContextControl.DefaultWindowTokens <= 0 {
+		cfg.ContextControl.DefaultWindowTokens = 8192
+	}
+	if cfg.ContextControl.OutputReserveTokens <= 0 {
+		cfg.ContextControl.OutputReserveTokens = 1024
+	}
+	if cfg.ContextControl.OutputReserveTokens >= cfg.ContextControl.DefaultWindowTokens {
+		cfg.ContextControl.OutputReserveTokens = maxInt(cfg.ContextControl.DefaultWindowTokens/4, 1)
+	}
+	if cfg.ContextControl.Stage1Pct <= 0 {
+		cfg.ContextControl.Stage1Pct = 70
+	}
+	if cfg.ContextControl.Stage2Pct <= 0 {
+		cfg.ContextControl.Stage2Pct = 82
+	}
+	if cfg.ContextControl.Stage3Pct <= 0 {
+		cfg.ContextControl.Stage3Pct = 90
+	}
+	if cfg.ContextControl.Stage2Pct < cfg.ContextControl.Stage1Pct {
+		cfg.ContextControl.Stage2Pct = cfg.ContextControl.Stage1Pct
+	}
+	if cfg.ContextControl.Stage3Pct < cfg.ContextControl.Stage2Pct {
+		cfg.ContextControl.Stage3Pct = cfg.ContextControl.Stage2Pct
+	}
+	if cfg.ContextControl.Stage3Pct > 100 {
+		cfg.ContextControl.Stage3Pct = 100
+	}
+	if cfg.ContextControl.MaxHistoryTurns <= 0 {
+		cfg.ContextControl.MaxHistoryTurns = 50
+	}
+	if cfg.ContextControl.MinHistoryTurns <= 0 {
+		cfg.ContextControl.MinHistoryTurns = 8
+	}
+	if cfg.ContextControl.MinHistoryTurns > cfg.ContextControl.MaxHistoryTurns {
+		cfg.ContextControl.MinHistoryTurns = cfg.ContextControl.MaxHistoryTurns
+	}
+	if cfg.ContextControl.BootstrapMaxChars <= 0 {
+		cfg.ContextControl.BootstrapMaxChars = 5000
+	}
+	if cfg.ContextControl.MemorySnippetMaxChars <= 0 {
+		cfg.ContextControl.MemorySnippetMaxChars = 360
+	}
+	if cfg.ContextControl.SkillPromptMaxChars <= 0 {
+		cfg.ContextControl.SkillPromptMaxChars = 12000
+	}
+	if strings.TrimSpace(cfg.ContextControl.Summary.Method) == "" {
+		cfg.ContextControl.Summary.Method = "model_written"
+	}
+	cfg.ContextControl.Summary.Method = strings.ToLower(strings.TrimSpace(cfg.ContextControl.Summary.Method))
+	if cfg.ContextControl.Summary.Method != "model_written" && cfg.ContextControl.Summary.Method != "trim_only" {
+		cfg.ContextControl.Summary.Method = "model_written"
+	}
+	if cfg.ContextControl.Summary.MaxInputTurns <= 0 {
+		cfg.ContextControl.Summary.MaxInputTurns = 24
+	}
+	if cfg.ContextControl.Summary.MaxOutputChars <= 0 {
+		cfg.ContextControl.Summary.MaxOutputChars = 1800
 	}
 }
 

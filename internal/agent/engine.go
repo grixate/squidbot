@@ -20,6 +20,7 @@ import (
 
 	"github.com/grixate/squidbot/internal/budget"
 	"github.com/grixate/squidbot/internal/config"
+	"github.com/grixate/squidbot/internal/contextctrl"
 	"github.com/grixate/squidbot/internal/federation"
 	"github.com/grixate/squidbot/internal/memory"
 	"github.com/grixate/squidbot/internal/mission"
@@ -60,6 +61,7 @@ type Engine struct {
 	skills              skills.Runtime
 	subagents           *subagent.Manager
 	budgetGuard         *budget.Guard
+	contextRegistry     *contextctrl.Registry
 	federationClient    *federation.Client
 	fedCancelMu         sync.Mutex
 	fedCancels          map[string]context.CancelFunc
@@ -98,6 +100,7 @@ func NewEngine(cfg config.Config, providerClient provider.LLMProvider, model str
 		policy:              policy,
 		memory:              memory.NewManager(cfg),
 		budgetGuard:         budget.NewGuard(store, metrics),
+		contextRegistry:     contextctrl.NewRegistry(cfg.ContextControl.RegistryPath, cfg.ContextControl.DefaultWindowTokens, cfg.ContextControl.OutputReserveTokens, 4.0, logger.Printf),
 		federationClient:    federation.NewClient(time.Duration(max(cfg.Runtime.Federation.RequestTimeoutSec, 1)) * time.Second),
 		fedCancels:          map[string]context.CancelFunc{},
 		tokenSafetyCacheTTL: 2 * time.Second,
@@ -207,15 +210,14 @@ func (e *Engine) AskStream(ctx context.Context, msg InboundMessage, sink StreamS
 	cfg := e.currentConfig()
 	providerClient, model := e.currentProviderModel()
 	if providerClient.Capabilities().SupportsStream {
-		history, err := e.store.Window(ctx, msg.SessionID, 50)
-		if err == nil {
-			skillActivation, skillErr := e.activateSkills(ctx, msg.Content, msg.Channel, msg.SessionID, false, nil)
-			if skillErr != nil {
-				_ = sink.OnEvent(ctx, StreamEvent{Type: "error", Error: skillErr.Error(), Done: true})
-				return skillErr
-			}
-			systemPrompt := buildSystemPromptWithSkills(cfg, msg.Content, &skillActivation)
-			messages := buildMessages(systemPrompt, history, msg.Content)
+		skillActivation, skillErr := e.activateSkills(ctx, msg.Content, msg.Channel, msg.SessionID, false, nil)
+		if skillErr != nil {
+			_ = sink.OnEvent(ctx, StreamEvent{Type: "error", Error: skillErr.Error(), Done: true})
+			return skillErr
+		}
+		built, buildErr := e.buildAdaptiveMessages(ctx, cfg, model, msg.SessionID, msg.Content, skillActivation, nil)
+		if buildErr == nil {
+			messages := built.Messages
 			events, errs := providerClient.Stream(ctx, provider.ChatRequest{
 				Messages:    messages,
 				Model:       model,
@@ -476,10 +478,6 @@ func (h *sessionHandler) process(ctx context.Context, msg InboundMessage) (strin
 	turnCtx, cancel := context.WithTimeout(ctx, turnTimeout)
 	defer cancel()
 
-	history, err := h.engine.store.Window(turnCtx, h.sessionID, 50)
-	if err != nil {
-		return "", err
-	}
 	skillActivation, skillErr := h.engine.activateSkills(turnCtx, msg.Content, msg.Channel, h.sessionID, false, nil)
 	if skillErr != nil {
 		finalContent := skillErr.Error()
@@ -491,8 +489,13 @@ func (h *sessionHandler) process(ctx context.Context, msg InboundMessage) (strin
 		}
 		return finalContent, nil
 	}
-	systemPrompt := buildSystemPromptWithSkills(cfg, msg.Content, &skillActivation)
-	messages := buildMessages(systemPrompt, history, msg.Content)
+	_, model := h.engine.currentProviderModel()
+	built, buildErr := h.engine.buildAdaptiveMessages(turnCtx, cfg, model, h.sessionID, msg.Content, skillActivation, nil)
+	if buildErr != nil {
+		return "", buildErr
+	}
+	messages := built.Messages
+	contextStage := built.Stage
 	registry, err := h.engine.buildRegistry(msg)
 	if err != nil {
 		return "", err
@@ -504,6 +507,7 @@ func (h *sessionHandler) process(ctx context.Context, msg InboundMessage) (strin
 	}
 	finalContent := ""
 	budgetWarnings := []string{}
+	contextRetryUsed := false
 
 	for i := 0; i < maxHops; i++ {
 		settings := h.engine.effectiveTokenSafety(turnCtx)
@@ -539,6 +543,17 @@ func (h *sessionHandler) process(ctx context.Context, msg InboundMessage) (strin
 		if chatErr != nil {
 			h.engine.budgetGuard.Abort(turnCtx, preflight)
 			h.engine.metrics.ProviderErrors.Add(1)
+			if cfg.ContextControl.Enabled && !contextRetryUsed && i == 0 && cfg.ContextControl.ContextOverflowRetryOnce && isContextLengthError(chatErr) {
+				nextStage := contextctrl.NextStricterStage(contextStage)
+				rebuilt, rebuildErr := h.engine.buildAdaptiveMessages(turnCtx, cfg, model, h.sessionID, msg.Content, skillActivation, &nextStage)
+				if rebuildErr == nil {
+					contextRetryUsed = true
+					contextStage = rebuilt.Stage
+					messages = rebuilt.Messages
+					continue
+				}
+				h.engine.log.Printf("contextctrl overflow retry fallback failed session=%s err=%v", h.sessionID, rebuildErr)
+			}
 			return "", chatErr
 		}
 		commit, commitErr := h.engine.budgetGuard.Commit(turnCtx, settings, scopeLimits, preflight, budget.Usage{

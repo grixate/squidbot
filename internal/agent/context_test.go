@@ -91,6 +91,34 @@ func TestBuildSystemPromptWithSkillsUsesActivatedOnly(t *testing.T) {
 	}
 }
 
+func TestBuildSystemPromptWithOptionsIncludesSessionSummary(t *testing.T) {
+	workspace := t.TempDir()
+	mustWrite(t, filepath.Join(workspace, "AGENTS.md"), "# Agent")
+	mustWrite(t, filepath.Join(workspace, "SOUL.md"), "# Soul")
+	mustWrite(t, filepath.Join(workspace, "USER.md"), "# User")
+	mustWrite(t, filepath.Join(workspace, "TOOLS.md"), "# Tools")
+	mustWrite(t, filepath.Join(workspace, "memory", "MEMORY.md"), "curated")
+
+	cfg := config.Default()
+	cfg.Agents.Defaults.Workspace = workspace
+	cfg.Memory.Enabled = false
+
+	prompt := buildSystemPromptWithSkillsAndOptions(cfg, "hello", nil, PromptBuildOptions{
+		SessionSummary:       "Previous session summary.",
+		IncludeSkills:        false,
+		IncludeCuratedMemory: false,
+	})
+	if !strings.Contains(prompt, "## Session Summary") {
+		t.Fatalf("expected session summary section, got:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "## Curated Memory") {
+		t.Fatalf("did not expect curated memory section, got:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "## Skill Contracts") {
+		t.Fatalf("did not expect skill contracts section, got:\n%s", prompt)
+	}
+}
+
 func mustWrite(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

@@ -135,6 +135,31 @@ func TestDefaultIncludesMemoryAndSkillsSettings(t *testing.T) {
 	if len(cfg.Runtime.TokenSafety.TrustedWriters) == 0 || cfg.Runtime.TokenSafety.TrustedWriters[0] != "cli:user" {
 		t.Fatalf("unexpected tokenSafety.trustedWriters default: %#v", cfg.Runtime.TokenSafety.TrustedWriters)
 	}
+	if cfg.ContextControl.Enabled {
+		t.Fatal("expected contextControl.enabled default false")
+	}
+	if cfg.ContextControl.DefaultWindowTokens != 8192 {
+		t.Fatalf("unexpected contextControl.defaultWindowTokens: %d", cfg.ContextControl.DefaultWindowTokens)
+	}
+	if cfg.ContextControl.OutputReserveTokens != 1024 {
+		t.Fatalf("unexpected contextControl.outputReserveTokens: %d", cfg.ContextControl.OutputReserveTokens)
+	}
+	if cfg.ContextControl.Stage1Pct != 70 || cfg.ContextControl.Stage2Pct != 82 || cfg.ContextControl.Stage3Pct != 90 {
+		t.Fatalf("unexpected contextControl stages: %d/%d/%d",
+			cfg.ContextControl.Stage1Pct,
+			cfg.ContextControl.Stage2Pct,
+			cfg.ContextControl.Stage3Pct,
+		)
+	}
+	if cfg.ContextControl.MaxHistoryTurns != 50 || cfg.ContextControl.MinHistoryTurns != 8 {
+		t.Fatalf("unexpected contextControl history bounds: %d/%d",
+			cfg.ContextControl.MaxHistoryTurns,
+			cfg.ContextControl.MinHistoryTurns,
+		)
+	}
+	if cfg.ContextControl.Summary.Method != "model_written" {
+		t.Fatalf("unexpected contextControl summary method: %q", cfg.ContextControl.Summary.Method)
+	}
 }
 
 func TestLoadBackfillsMissingMemoryAndSkillsFields(t *testing.T) {
@@ -266,5 +291,69 @@ func TestLoadAppliesCronEnvOverrides(t *testing.T) {
 	}
 	if cfg.Runtime.Cron.MaxQueue != 77 {
 		t.Fatalf("unexpected cron maxQueue from env: %d", cfg.Runtime.Cron.MaxQueue)
+	}
+}
+
+func TestLoadAppliesContextControlEnvOverrides(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SQUIDBOT_CONTEXT_CONTROL_ENABLED", "true")
+	t.Setenv("SQUIDBOT_CONTEXT_CONTROL_REGISTRY_PATH", "/tmp/windows.json")
+	t.Setenv("SQUIDBOT_CONTEXT_CONTROL_DEFAULT_WINDOW_TOKENS", "16384")
+	t.Setenv("SQUIDBOT_CONTEXT_CONTROL_OUTPUT_RESERVE_TOKENS", "2048")
+	t.Setenv("SQUIDBOT_CONTEXT_CONTROL_STAGE1_PCT", "65")
+	t.Setenv("SQUIDBOT_CONTEXT_CONTROL_STAGE2_PCT", "80")
+	t.Setenv("SQUIDBOT_CONTEXT_CONTROL_STAGE3_PCT", "92")
+	t.Setenv("SQUIDBOT_CONTEXT_CONTROL_MAX_HISTORY_TURNS", "40")
+	t.Setenv("SQUIDBOT_CONTEXT_CONTROL_MIN_HISTORY_TURNS", "6")
+	t.Setenv("SQUIDBOT_CONTEXT_CONTROL_BOOTSTRAP_MAX_CHARS", "3000")
+	t.Setenv("SQUIDBOT_CONTEXT_CONTROL_MEMORY_SNIPPET_MAX_CHARS", "220")
+	t.Setenv("SQUIDBOT_CONTEXT_CONTROL_SKILL_PROMPT_MAX_CHARS", "2000")
+	t.Setenv("SQUIDBOT_CONTEXT_CONTROL_SUMMARY_ENABLED", "false")
+	t.Setenv("SQUIDBOT_CONTEXT_CONTROL_SUMMARY_METHOD", "trim_only")
+	t.Setenv("SQUIDBOT_CONTEXT_CONTROL_SUMMARY_MAX_INPUT_TURNS", "12")
+	t.Setenv("SQUIDBOT_CONTEXT_CONTROL_SUMMARY_MAX_OUTPUT_CHARS", "900")
+
+	cfg, err := Load(filepath.Join(t.TempDir(), "missing-config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.ContextControl.Enabled {
+		t.Fatal("expected context control enabled from env")
+	}
+	if cfg.ContextControl.RegistryPath != "/tmp/windows.json" {
+		t.Fatalf("unexpected context registry path: %s", cfg.ContextControl.RegistryPath)
+	}
+	if cfg.ContextControl.DefaultWindowTokens != 16384 {
+		t.Fatalf("unexpected default window tokens: %d", cfg.ContextControl.DefaultWindowTokens)
+	}
+	if cfg.ContextControl.OutputReserveTokens != 2048 {
+		t.Fatalf("unexpected reserve tokens: %d", cfg.ContextControl.OutputReserveTokens)
+	}
+	if cfg.ContextControl.Stage1Pct != 65 || cfg.ContextControl.Stage2Pct != 80 || cfg.ContextControl.Stage3Pct != 92 {
+		t.Fatalf("unexpected stages: %d/%d/%d",
+			cfg.ContextControl.Stage1Pct,
+			cfg.ContextControl.Stage2Pct,
+			cfg.ContextControl.Stage3Pct,
+		)
+	}
+	if cfg.ContextControl.MaxHistoryTurns != 40 || cfg.ContextControl.MinHistoryTurns != 6 {
+		t.Fatalf("unexpected history bounds: %d/%d",
+			cfg.ContextControl.MaxHistoryTurns,
+			cfg.ContextControl.MinHistoryTurns,
+		)
+	}
+	if cfg.ContextControl.BootstrapMaxChars != 3000 ||
+		cfg.ContextControl.MemorySnippetMaxChars != 220 ||
+		cfg.ContextControl.SkillPromptMaxChars != 2000 {
+		t.Fatalf("unexpected context char limits: %#v", cfg.ContextControl)
+	}
+	if cfg.ContextControl.Summary.Enabled {
+		t.Fatal("expected summary disabled from env")
+	}
+	if cfg.ContextControl.Summary.Method != "trim_only" {
+		t.Fatalf("unexpected summary method: %q", cfg.ContextControl.Summary.Method)
+	}
+	if cfg.ContextControl.Summary.MaxInputTurns != 12 || cfg.ContextControl.Summary.MaxOutputChars != 900 {
+		t.Fatalf("unexpected summary limits: %#v", cfg.ContextControl.Summary)
 	}
 }
