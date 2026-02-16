@@ -113,6 +113,7 @@ Avoid provider lock-in.
 
 - Dynamic provider model routing
 - OpenClaw catalog parity support
+- Out-of-box providers: OpenRouter, Anthropic, OpenAI, Gemini, Ollama, LM Studio, Moonshot AI, MiniMax
 - Multiple provider and channel profiles
 - Graceful fallback behavior
 

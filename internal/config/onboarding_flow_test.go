@@ -111,6 +111,42 @@ func TestRunOnboardingNonInteractiveOllamaSuccess(t *testing.T) {
 	}
 }
 
+func TestRunOnboardingNonInteractiveMoonshotSuccess(t *testing.T) {
+	result, err := RunOnboarding(context.Background(), Default(), OnboardingOptions{
+		Provider:       "moonshot",
+		APIKey:         "sk-test",
+		NonInteractive: true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Config.Providers.Active != "moonshot" {
+		t.Fatalf("unexpected active provider: %s", result.Config.Providers.Active)
+	}
+	providerCfg, _ := result.Config.ProviderByName("moonshot")
+	if providerCfg.APIBase != ProviderDefaultAPIBase("moonshot") {
+		t.Fatalf("unexpected moonshot api base: %s", providerCfg.APIBase)
+	}
+}
+
+func TestRunOnboardingNonInteractiveMiniMaxSuccess(t *testing.T) {
+	result, err := RunOnboarding(context.Background(), Default(), OnboardingOptions{
+		Provider:       "minimax",
+		APIKey:         "sk-test",
+		NonInteractive: true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Config.Providers.Active != "minimax" {
+		t.Fatalf("unexpected active provider: %s", result.Config.Providers.Active)
+	}
+	providerCfg, _ := result.Config.ProviderByName("minimax")
+	if providerCfg.APIBase != ProviderDefaultAPIBase("minimax") {
+		t.Fatalf("unexpected minimax api base: %s", providerCfg.APIBase)
+	}
+}
+
 func TestRunOnboardingGeminiVerificationWarningInteractive(t *testing.T) {
 	input := strings.NewReader("4\nsk-gemini\n\n1\nn\ny\n")
 	result, err := RunOnboarding(context.Background(), Default(), OnboardingOptions{

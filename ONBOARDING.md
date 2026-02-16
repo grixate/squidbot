@@ -22,6 +22,8 @@ Onboarding also ensures workspace scaffolding for:
 - `memory/daily/` (episodic logs)
 - `skills/README.md` (drop custom `skills/**/SKILL.md` contracts here)
 
+Default providers include OpenRouter, Anthropic, OpenAI, Gemini, Ollama, LM Studio, Moonshot AI, and MiniMax.
+
 ## Non-Interactive Setup
 
 Gemini:
@@ -40,6 +42,18 @@ LM Studio:
 
 ```bash
 ./squidbot onboard --non-interactive --provider lmstudio --model local-model --api-base http://localhost:1234/v1
+```
+
+Moonshot AI:
+
+```bash
+./squidbot onboard --non-interactive --provider moonshot --api-key "$SQUIDBOT_PROVIDER_MOONSHOT_API_KEY"
+```
+
+MiniMax:
+
+```bash
+./squidbot onboard --non-interactive --provider minimax --api-key "$SQUIDBOT_PROVIDER_MINIMAX_API_KEY"
 ```
 
 Telegram flags:
