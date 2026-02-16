@@ -53,4 +53,38 @@ func TestValidateActiveProvider(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	})
+
+	t.Run("moonshot missing key", func(t *testing.T) {
+		cfg := Default()
+		cfg.Providers.Active = "moonshot"
+		if err := ValidateActiveProvider(cfg); err == nil {
+			t.Fatal("expected error for moonshot missing api key")
+		}
+	})
+
+	t.Run("minimax missing key", func(t *testing.T) {
+		cfg := Default()
+		cfg.Providers.Active = "minimax"
+		if err := ValidateActiveProvider(cfg); err == nil {
+			t.Fatal("expected error for minimax missing api key")
+		}
+	})
+
+	t.Run("moonshot with api key", func(t *testing.T) {
+		cfg := Default()
+		cfg.Providers.Active = "moonshot"
+		_ = cfg.SetProviderByName("moonshot", ProviderConfig{APIKey: "test-key"})
+		if err := ValidateActiveProvider(cfg); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("minimax with api key", func(t *testing.T) {
+		cfg := Default()
+		cfg.Providers.Active = "minimax"
+		_ = cfg.SetProviderByName("minimax", ProviderConfig{APIKey: "test-key"})
+		if err := ValidateActiveProvider(cfg); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
 }

@@ -8,7 +8,7 @@ Go-native personal AI assistant with Telegram integration, actor-based session r
 - BoltDB primary storage (`~/.squidbot/data/squidbot.db`)
 - SQLite memory index for markdown-based retrieval (`~/.squidbot/data/memory_index.db`)
 - Tool loop with typed tool argument boundaries
-- Provider adapters for OpenRouter, Anthropic, OpenAI, Gemini, Ollama, and LM Studio
+- Provider adapters for OpenRouter, Anthropic, OpenAI, Gemini, Ollama, LM Studio, Moonshot AI, and MiniMax
 - Mandatory provider-gated onboarding before runtime commands
 - Browser onboarding and management UI server (`squidbot manage`)
 - Telegram channel adapter (polling)
@@ -84,6 +84,18 @@ Example: LM Studio
 
 ```bash
 ./squidbot onboard --non-interactive --provider lmstudio --model local-model --api-base http://localhost:1234/v1
+```
+
+Example: Moonshot AI
+
+```bash
+./squidbot onboard --non-interactive --provider moonshot --api-key "$SQUIDBOT_PROVIDER_MOONSHOT_API_KEY"
+```
+
+Example: MiniMax
+
+```bash
+./squidbot onboard --non-interactive --provider minimax --api-key "$SQUIDBOT_PROVIDER_MINIMAX_API_KEY"
 ```
 
 Telegram flags for non-interactive onboarding:
