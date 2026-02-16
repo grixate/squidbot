@@ -81,6 +81,18 @@ func TestDefaultIncludesMemoryAndSkillsSettings(t *testing.T) {
 	if cfg.Runtime.Subagents.ReinjectCompletion {
 		t.Fatal("expected subagents.reinjectCompletion default false")
 	}
+	if !cfg.Runtime.Cron.Enabled {
+		t.Fatal("expected cron.enabled default true")
+	}
+	if cfg.Runtime.Cron.TickIntervalMs != 1000 {
+		t.Fatalf("unexpected cron.tickIntervalMs default: %d", cfg.Runtime.Cron.TickIntervalMs)
+	}
+	if cfg.Runtime.Cron.MaxConcurrent != 4 {
+		t.Fatalf("unexpected cron.maxConcurrent default: %d", cfg.Runtime.Cron.MaxConcurrent)
+	}
+	if cfg.Runtime.Cron.MaxQueue != 128 {
+		t.Fatalf("unexpected cron.maxQueue default: %d", cfg.Runtime.Cron.MaxQueue)
+	}
 	if cfg.Runtime.Federation.Enabled {
 		t.Fatal("expected federation.enabled default false")
 	}
@@ -229,5 +241,30 @@ func TestLoadAppliesSkillsEnvOverrides(t *testing.T) {
 	}
 	if cfg.Skills.CacheDir != "/tmp/skills-cache" {
 		t.Fatalf("unexpected skills cacheDir from env: %s", cfg.Skills.CacheDir)
+	}
+}
+
+func TestLoadAppliesCronEnvOverrides(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SQUIDBOT_CRON_ENABLED", "false")
+	t.Setenv("SQUIDBOT_CRON_TICK_INTERVAL_MS", "250")
+	t.Setenv("SQUIDBOT_CRON_MAX_CONCURRENT", "9")
+	t.Setenv("SQUIDBOT_CRON_MAX_QUEUE", "77")
+
+	cfg, err := Load(filepath.Join(t.TempDir(), "missing-config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Runtime.Cron.Enabled {
+		t.Fatal("expected cron disabled from env")
+	}
+	if cfg.Runtime.Cron.TickIntervalMs != 250 {
+		t.Fatalf("unexpected cron tick interval from env: %d", cfg.Runtime.Cron.TickIntervalMs)
+	}
+	if cfg.Runtime.Cron.MaxConcurrent != 9 {
+		t.Fatalf("unexpected cron maxConcurrent from env: %d", cfg.Runtime.Cron.MaxConcurrent)
+	}
+	if cfg.Runtime.Cron.MaxQueue != 77 {
+		t.Fatalf("unexpected cron maxQueue from env: %d", cfg.Runtime.Cron.MaxQueue)
 	}
 }

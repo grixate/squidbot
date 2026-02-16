@@ -144,11 +144,19 @@ type RuntimeConfig struct {
 	MailboxSize          int                      `json:"mailboxSize"`
 	ActorIdleTTL         DurationValue            `json:"actorIdleTtl"`
 	HeartbeatIntervalSec int                      `json:"heartbeatIntervalSec"`
+	Cron                 CronRuntimeConfig        `json:"cron"`
 	Subagents            SubagentRuntimeConfig    `json:"subagents"`
 	Federation           FederationRuntimeConfig  `json:"federation"`
 	Plugins              PluginsRuntimeConfig     `json:"plugins"`
 	MetricsHTTP          MetricsHTTPRuntimeConfig `json:"metricsHttp"`
 	TokenSafety          TokenSafetyRuntimeConfig `json:"tokenSafety"`
+}
+
+type CronRuntimeConfig struct {
+	Enabled        bool `json:"enabled"`
+	TickIntervalMs int  `json:"tickIntervalMs"`
+	MaxConcurrent  int  `json:"maxConcurrent"`
+	MaxQueue       int  `json:"maxQueue"`
 }
 
 type PluginsRuntimeConfig struct {
@@ -394,6 +402,12 @@ func Default() Config {
 			MailboxSize:          64,
 			ActorIdleTTL:         DurationValue{Duration: 15 * time.Minute},
 			HeartbeatIntervalSec: 1800,
+			Cron: CronRuntimeConfig{
+				Enabled:        true,
+				TickIntervalMs: 1000,
+				MaxConcurrent:  4,
+				MaxQueue:       128,
+			},
 			Subagents: SubagentRuntimeConfig{
 				Enabled:            true,
 				MaxConcurrent:      4,
@@ -769,6 +783,26 @@ func applyEnvOverrides(cfg *Config) {
 	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_SKILLS_CACHE_DIR")); value != "" {
 		cfg.Skills.CacheDir = value
 	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_CRON_ENABLED")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			cfg.Runtime.Cron.Enabled = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_CRON_TICK_INTERVAL_MS")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.Runtime.Cron.TickIntervalMs = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_CRON_MAX_CONCURRENT")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.Runtime.Cron.MaxConcurrent = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_CRON_MAX_QUEUE")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.Runtime.Cron.MaxQueue = parsed
+		}
+	}
 	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_SUBAGENTS_ENABLED")); value != "" {
 		parsed, err := strconv.ParseBool(value)
 		if err == nil {
@@ -929,6 +963,7 @@ func applyEnvOverrides(cfg *Config) {
 	migrateLegacyChannels(cfg)
 	normalizeDefaultChannels(cfg)
 	normalizeSkillsConfig(cfg)
+	normalizeCronRuntimeConfig(cfg)
 }
 
 func splitCSV(value string) []string {
@@ -972,6 +1007,21 @@ func normalizeSkillsConfig(cfg *Config) {
 	}
 	if cfg.Skills.Policy.Channels == nil {
 		cfg.Skills.Policy.Channels = map[string]SkillsChannelPolicyConfig{}
+	}
+}
+
+func normalizeCronRuntimeConfig(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	if cfg.Runtime.Cron.TickIntervalMs <= 0 {
+		cfg.Runtime.Cron.TickIntervalMs = 1000
+	}
+	if cfg.Runtime.Cron.MaxConcurrent <= 0 {
+		cfg.Runtime.Cron.MaxConcurrent = 4
+	}
+	if cfg.Runtime.Cron.MaxQueue <= 0 {
+		cfg.Runtime.Cron.MaxQueue = 128
 	}
 }
 

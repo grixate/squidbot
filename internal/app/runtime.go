@@ -22,18 +22,19 @@ import (
 )
 
 type Runtime struct {
-	Config     config.Config
-	Store      *storepkg.Store
-	Engine     *agent.Engine
-	Cron       *cron.Service
-	Heartbeat  *heartbeat.Service
-	Channels   *channelreg.Registry
-	Metrics    *telemetry.Metrics
-	log        *log.Logger
-	cancel     context.CancelFunc
-	done       chan struct{}
-	metricsSrv *http.Server
-	federationSrv *http.Server
+	Config           config.Config
+	Store            *storepkg.Store
+	Engine           *agent.Engine
+	Cron             *cron.Service
+	Heartbeat        *heartbeat.Service
+	Channels         *channelreg.Registry
+	Metrics          *telemetry.Metrics
+	log              *log.Logger
+	cancel           context.CancelFunc
+	done             chan struct{}
+	metricsSrv       *http.Server
+	federationSrv    *http.Server
+	federationListen func(network, address string) (net.Listener, error)
 }
 
 func BuildRuntime(cfg config.Config, logger *log.Logger) (*Runtime, error) {
@@ -56,7 +57,15 @@ func BuildRuntime(cfg config.Config, logger *log.Logger) (*Runtime, error) {
 		return nil, err
 	}
 
-	runtime := &Runtime{Config: cfg, Store: store, Engine: engine, Metrics: metrics, log: logger, done: make(chan struct{})}
+	runtime := &Runtime{
+		Config:           cfg,
+		Store:            store,
+		Engine:           engine,
+		Metrics:          metrics,
+		log:              logger,
+		done:             make(chan struct{}),
+		federationListen: net.Listen,
+	}
 	runtime.Cron = cron.NewService(store, func(ctx context.Context, job cron.Job) (string, error) {
 		response, err := engine.Ask(ctx, agent.InboundMessage{
 			SessionID: "cron:" + job.ID,
@@ -74,7 +83,12 @@ func BuildRuntime(cfg config.Config, logger *log.Logger) (*Runtime, error) {
 			engine.EmitOutbound(job.Payload.Channel, job.Payload.To, response, map[string]interface{}{"source": "cron", "job_id": job.ID})
 		}
 		return response, nil
-	}, metrics)
+	}, metrics, cron.Options{
+		Enabled:       cfg.Runtime.Cron.Enabled,
+		TickInterval:  time.Duration(cfg.Runtime.Cron.TickIntervalMs) * time.Millisecond,
+		MaxConcurrent: cfg.Runtime.Cron.MaxConcurrent,
+		MaxQueue:      cfg.Runtime.Cron.MaxQueue,
+	})
 
 	runtime.Heartbeat = heartbeat.NewService(config.WorkspacePath(cfg), time.Duration(cfg.Runtime.HeartbeatIntervalSec)*time.Second, func(ctx context.Context, prompt string) (string, error) {
 		response, err := engine.Ask(ctx, agent.InboundMessage{
@@ -178,7 +192,16 @@ func (r *Runtime) StartGateway(ctx context.Context) error {
 	r.Cron.Start()
 	r.Heartbeat.Start()
 	r.startMetricsHTTP()
-	r.startFederationHTTP(ctx)
+	if err := r.startFederationHTTP(ctx); err != nil {
+		cancel()
+		if r.metricsSrv != nil {
+			_ = r.metricsSrv.Shutdown(context.Background())
+			r.metricsSrv = nil
+		}
+		r.Cron.Stop()
+		r.Heartbeat.Stop()
+		return err
+	}
 
 	go func() {
 		defer close(r.done)

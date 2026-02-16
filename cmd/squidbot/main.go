@@ -211,6 +211,8 @@ func statusCmd(configPath string) *cobra.Command {
 				cfg.Tools.Exec.Enabled, cfg.Tools.Filesystem.ParentWriteEnabled, cfg.Tools.Filesystem.SubagentWriteEnabled)
 			fmt.Printf("Plugins runtime: enabled=%v paths=%d timeoutSec=%d maxConcurrent=%d maxProcesses=%d\n",
 				cfg.Runtime.Plugins.Enabled, len(cfg.Runtime.Plugins.Paths), cfg.Runtime.Plugins.DefaultTimeoutSec, cfg.Runtime.Plugins.MaxConcurrent, cfg.Runtime.Plugins.MaxProcesses)
+			fmt.Printf("Cron runtime: enabled=%v tickMs=%d maxConcurrent=%d maxQueue=%d\n",
+				cfg.Runtime.Cron.Enabled, cfg.Runtime.Cron.TickIntervalMs, cfg.Runtime.Cron.MaxConcurrent, cfg.Runtime.Cron.MaxQueue)
 			fmt.Printf("Federation runtime: enabled=%v nodeId=%s listen=%s peers=%d allowFrom=%d retries=%d backoffMs=%d autoFallback=%v\n",
 				cfg.Runtime.Federation.Enabled,
 				strings.TrimSpace(cfg.Runtime.Federation.NodeID),
@@ -806,14 +808,6 @@ func skillsCmd(configPath string) *cobra.Command {
 							"warnings":   activation.Warnings,
 						}
 					}
-				}
-				if showJSON {
-					raw, err := json.MarshalIndent(payload, "", "  ")
-					if err != nil {
-						return err
-					}
-					fmt.Fprintln(cmd.OutOrStdout(), string(raw))
-					return nil
 				}
 				raw, err := json.MarshalIndent(payload, "", "  ")
 				if err != nil {

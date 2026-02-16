@@ -14,6 +14,14 @@ type Metrics struct {
 	ToolCalls                   atomic.Uint64
 	ToolErrors                  atomic.Uint64
 	CronExecutions              atomic.Uint64
+	CronQueued                  atomic.Uint64
+	CronQueueDepth              atomic.Uint64
+	CronQueueFull               atomic.Uint64
+	CronRunning                 atomic.Int64
+	CronSucceeded               atomic.Uint64
+	CronFailed                  atomic.Uint64
+	CronDispatchLagMS           atomic.Uint64
+	CronRunDurationMS           atomic.Uint64
 	HeartbeatExecutions         atomic.Uint64
 	SubagentQueued              atomic.Uint64
 	SubagentRunning             atomic.Uint64
@@ -51,6 +59,10 @@ func (m *Metrics) Snapshot() map[string]uint64 {
 	if turns < 0 {
 		turns = 0
 	}
+	cronRunning := m.CronRunning.Load()
+	if cronRunning < 0 {
+		cronRunning = 0
+	}
 	return map[string]uint64{
 		"inbound_count":                  m.InboundCount.Load(),
 		"outbound_count":                 m.OutboundCount.Load(),
@@ -61,6 +73,14 @@ func (m *Metrics) Snapshot() map[string]uint64 {
 		"tool_calls":                     m.ToolCalls.Load(),
 		"tool_errors":                    m.ToolErrors.Load(),
 		"cron_executions":                m.CronExecutions.Load(),
+		"cron_queued":                    m.CronQueued.Load(),
+		"cron_queue_depth":               m.CronQueueDepth.Load(),
+		"cron_queue_full":                m.CronQueueFull.Load(),
+		"cron_running":                   uint64(cronRunning),
+		"cron_succeeded":                 m.CronSucceeded.Load(),
+		"cron_failed":                    m.CronFailed.Load(),
+		"cron_dispatch_lag_ms":           m.CronDispatchLagMS.Load(),
+		"cron_run_duration_ms":           m.CronRunDurationMS.Load(),
 		"heartbeat_executions":           m.HeartbeatExecutions.Load(),
 		"subagent_queued":                m.SubagentQueued.Load(),
 		"subagent_running":               m.SubagentRunning.Load(),
