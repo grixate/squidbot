@@ -1,0 +1,270 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="1200" height="720" viewBox="0 0 1200 720" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Squidbot architecture diagram">
+  <defs>
+    <style>
+      .title{font:600 22px system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; fill:#0b1220}
+      .subtitle{font:400 14px system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; fill:#334155}
+      .label{font:600 14px system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; fill:#0b1220}
+      .small{font:500 12px system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; fill:#334155}
+      .box{fill:#ffffff; stroke:#0f172a; stroke-width:1.4; rx:16; ry:16}
+      .pill{fill:#f8fafc; stroke:#cbd5e1; stroke-width:1.2; rx:999; ry:999}
+      .accent{fill:#eef2ff; stroke:#6366f1; stroke-width:1.4; rx:16; ry:16}
+      .data{fill:#ecfeff; stroke:#06b6d4; stroke-width:1.4; rx:16; ry:16}
+      .ops{fill:#f0fdf4; stroke:#22c55e; stroke-width:1.4; rx:16; ry:16}
+      .danger{fill:#fff7ed; stroke:#f97316; stroke-width:1.4; rx:16; ry:16}
+      .arrow{stroke:#0f172a; stroke-width:1.6; fill:none; marker-end:url(#arrowhead)}
+      .dashed{stroke-dasharray:6 6}
+      .muted{stroke:#64748b}
+    </style>
+
+    <marker id="arrowhead" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+      <path d="M0,0 L10,4 L0,8 Z" fill="#0f172a"/>
+    </marker>
+
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#0b1220" flood-opacity="0.14"/>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect x="0" y="0" width="1200" height="720" fill="#f8fafc"/>
+  <rect x="40" y="40" width="1120" height="640" fill="#ffffff" stroke="#e2e8f0" stroke-width="1.2" rx="24" filter="url(#shadow)"/>
+
+  <!-- Header -->
+  <text x="80" y="92" class="title">Squidbot Architecture (Reliability-first Runtime)</text>
+  <text x="80" y="118" class="subtitle">Actor-isolated sessions • Durable runtime ledger • Human-editable memory • Automation • Safety budgets • Observability • Subagents + federation</text>
+
+  <!-- Left: Channels -->
+  <rect x="90" y="170" width="240" height="54" class="box"/>
+  <text x="210" y="202" text-anchor="middle" class="label">Channels / Users</text>
+  <text x="210" y="221" text-anchor="middle" class="small">Telegram • Slack • Discord • WebChat • WhatsApp</text>
+
+  <!-- Gateway -->
+  <rect x="90" y="265" width="240" height="70" class="accent"/>
+  <text x="210" y="298" text-anchor="middle" class="label">Gateway</text>
+  <text x="210" y="318" text-anchor="middle" class="small">Routing • Session lookup • Adapters + fallback</text>
+
+  <!-- Core: Session Actor -->
+  <rect x="400" y="240" width="360" height="120" class="accent"/>
+  <text x="580" y="275" text-anchor="middle" class="label">Session Actor</text>
+  <text x="580" y="298" text-anchor="middle" class="small">Bounded mailbox • Backpressure • Checkpoint load/save</text>
+  <text x="580" y="320" text-anchor="middle" class="small">Tool loop under budgets • Durable event recording</text>
+
+  <!-- Prompt Assembly -->
+  <rect x="420" y="400" width="320" height="86" class="box"/>
+  <text x="580" y="434" text-anchor="middle" class="label">Prompt Assembly</text>
+  <text x="580" y="455" text-anchor="middle" class="small">Bootstrap docs + retrieved memory + activated skills</text>
+  <text x="580" y="474" text-anchor="middle" class="small">Context shaping + progressive disclosure</text>
+
+  <!-- Skills Runtime -->
+  <rect x="800" y="392" width="310" height="92" class="box"/>
+  <text x="955" y="428" text-anchor="middle" class="label">Skills Runtime</text>
+  <text x="955" y="450" text-anchor="middle" class="small">Discovery • Routing • Policy filters</text>
+  <text x="955" y="470" text-anchor="middle" class="small">Tool contracts • Safe exposure</text>
+
+  <!-- Providers -->
+  <rect x="800" y="250" width="310" height="100" class="box"/>
+  <text x="955" y="286" text-anchor="middle" class="label">Model Providers</text>
+  <text x="955" y="308" text-anchor="middle" class="small">Multi-provider routing • OpenClaw catalog parity</text>
+  <text x="955" y="330" text-anchor="middle" class="small">Portability without lock-in</text>
+
+  <!-- Data stores -->
+  <rect x="400" y="520" width="360" height="110" class="data"/>
+  <text x="580" y="555" text-anchor="middle" class="label">Durable State</text>
+  <text x="580" y="578" text-anchor="middle" class="small">BoltDB runtime ledger: turns • tools • jobs • runs • checkpoints</text>
+  <text x="580" y="600" text-anchor="middle" class="small">Budgets • safety events • subagent/federation events</text>
+
+  <rect x="90" y="520" width="240" height="110" class="data"/>
+  <text x="210" y="555" text-anchor="middle" class="label">Memory Files</text>
+  <text x="210" y="578" text-anchor="middle" class="small">memory/MEMORY.md</text>
+  <text x="210" y="598" text-anchor="middle" class="small">memory/daily/*.md</text>
+
+  <rect x="90" y="650" width="240" height="44" class="pill" opacity="0"/>
+  <!-- (placeholder for spacing) -->
+
+  <rect x="400" y="650" width="360" height="44" class="pill" opacity="0"/>
+
+  <rect x="90" y="645" width="240" height="0" fill="none"/>
+
+  <rect x="90" y="610" width="240" height="70" fill="none"/>
+
+  <rect x="90" y="640" width="240" height="0" fill="none"/>
+
+  <!-- Memory index -->
+  <rect x="90" y="640" width="240" height="0" fill="none"/>
+
+  <rect x="90" y="640" width="240" height="0" fill="none"/>
+
+  <rect x="90" y="640" width="240" height="0" fill="none"/>
+
+  <rect x="90" y="640" width="240" height="0" fill="none"/>
+
+  <rect x="90" y="640" width="240" height="0" fill="none"/>
+
+  <rect x="90" y="640" width="240" height="0" fill="none"/>
+
+  <rect x="90" y="640" width="240" height="0" fill="none"/>
+
+  <!-- Memory Index box -->
+  <rect x="90" y="640" width="240" height="0" fill="none"/>
+
+  <rect x="90" y="640" width="240" height="0" fill="none"/>
+
+  <rect x="90" y="640" width="240" height="0" fill="none"/>
+
+  <rect x="90" y="640" width="240" height="0" fill="none"/>
+
+  <rect x="90" y="640" width="240" height="0" fill="none"/>
+
+  <rect x="90" y="640" width="240" height="0" fill="none"/>
+
+  <!-- Actual Memory Index -->
+  <rect x="90" y="640" width="240" height="0" fill="none"/>
+
+  <!-- Place Memory Index between memory and actor -->
+  <rect x="90" y="650" width="240" height="0" fill="none"/>
+
+  <rect x="90" y="640" width="240" height="0" fill="none"/>
+
+  <!-- Use a separate region for Memory Index -->
+  <rect x="90" y="640" width="240" height="0" fill="none"/>
+
+  <rect x="90" y="640" width="240" height="0" fill="none"/>
+
+  <!-- Memory Index (real) -->
+  <rect x="90" y="640" width="240" height="0" fill="none"/>
+
+  <!-- We'll actually draw it at x=90 y=640? no space. Put above memory files -->
+  <rect x="90" y="450" width="240" height="58" class="box"/>
+  <text x="210" y="482" text-anchor="middle" class="label">Memory Index</text>
+  <text x="210" y="502" text-anchor="middle" class="small">SQLite FTS + optional semantic rerank</text>
+
+  <!-- Automation -->
+  <rect x="800" y="520" width="310" height="86" class="box"/>
+  <text x="955" y="554" text-anchor="middle" class="label">Automation</text>
+  <text x="955" y="576" text-anchor="middle" class="small">Cron • Heartbeat • Persisted run history</text>
+
+  <!-- Safety budgets -->
+  <rect x="800" y="620" width="310" height="68" class="danger"/>
+  <text x="955" y="651" text-anchor="middle" class="label">Safety & Budgets</text>
+  <text x="955" y="672" text-anchor="middle" class="small">Reservations • limits • warnings • accounting</text>
+
+  <!-- Observability -->
+  <rect x="400" y="170" width="360" height="56" class="ops"/>
+  <text x="580" y="202" text-anchor="middle" class="label">Observability</text>
+  <text x="580" y="222" text-anchor="middle" class="small">Doctor checks • Metrics endpoint • Health validation</text>
+
+  <!-- Subagents/Federation -->
+  <rect x="800" y="170" width="310" height="56" class="box"/>
+  <text x="955" y="202" text-anchor="middle" class="label">Subagents & Federation</text>
+  <text x="955" y="222" text-anchor="middle" class="small">Delegation • peer auth • idempotency • peer health</text>
+
+  <!-- Arrows -->
+  <path d="M210 224 L210 265" class="arrow"/>
+  <path d="M330 300 L400 300" class="arrow"/> <!-- Gateway -> Actor -->
+  <path d="M580 360 L580 400" class="arrow"/> <!-- Actor -> Prompt -->
+  <path d="M740 443 L800 443" class="arrow"/> <!-- Prompt -> Skills -->
+  <path d="M760 300 L800 300" class="arrow"/> <!-- Actor -> Providers -->
+  <path d="M955 350 L760 320" class="arrow dashed muted"/> <!-- Providers -> Actor (dashed) -->
+  <path d="M955 392 L760 400" class="arrow dashed muted"/> <!-- Skills -> Actor (dashed) -->
+
+  <path d="M580 240 L580 226" class="arrow"/> <!-- Actor -> Observability? actually reversed; draw from actor up -->
+  <path d="M580 240 L580 226" class="arrow" opacity="0"/> <!-- keep spacing -->
+
+  <!-- Observability connects (dashed) -->
+  <path d="M580 226 L580 240" class="arrow dashed muted"/> <!-- Observability -> Actor -->
+
+  <!-- Actor -> Durable State -->
+  <path d="M580 360 L580 520" class="arrow"/>
+
+  <!-- Actor -> Memory Index -->
+  <path d="M400 320 L330 320" class="arrow" opacity="0"/>
+  <path d="M400 320 L330 320" class="arrow" opacity="0"/>
+
+  <path d="M400 330 L330 330" class="arrow" opacity="0"/>
+
+  <path d="M400 330 L330 330" class="arrow" opacity="0"/>
+
+  <path d="M400 330 L330 330" class="arrow" opacity="0"/>
+
+  <path d="M400 330 L330 330" class="arrow" opacity="0"/>
+
+  <path d="M400 330 L330 330" class="arrow" opacity="0"/>
+
+  <path d="M400 330 L330 330" class="arrow" opacity="0"/>
+
+  <!-- Memory retrieval -->
+  <path d="M400 320 L330 320" class="arrow" opacity="0"/>
+
+  <path d="M400 320 L330 320" class="arrow" opacity="0"/>
+
+  <path d="M400 320 L330 320" class="arrow" opacity="0"/>
+
+  <path d="M400 320 L330 320" class="arrow" opacity="0"/>
+
+  <path d="M400 320 L330 320" class="arrow" opacity="0"/>
+
+  <path d="M400 320 L330 320" class="arrow" opacity="0"/>
+
+  <path d="M400 320 L330 320" class="arrow" opacity="0"/>
+
+  <path d="M400 320 L330 320" class="arrow" opacity="0"/>
+
+  <path d="M400 320 L330 320" class="arrow" opacity="0"/>
+
+  <path d="M400 320 L330 320" class="arrow" opacity="0"/>
+
+  <!-- Real arrows for memory -->
+  <path d="M330 479 L400 300" class="arrow dashed muted"/> <!-- Memory Index -> Actor (retrieval) -->
+  <path d="M210 520 L210 508" class="arrow"/> <!-- Memory Files -> Memory Index -->
+  <path d="M210 520 L210 508" class="arrow" opacity="0"/> <!-- keep -->
+  <path d="M210 508 L210 508" class="arrow" opacity="0"/>
+
+  <path d="M210 520 L210 508" class="arrow" opacity="0"/>
+  <path d="M210 520 L210 508" class="arrow" opacity="0"/>
+
+  <path d="M210 520 L210 508" class="arrow" opacity="0"/>
+
+  <path d="M210 520 L210 508" class="arrow" opacity="0"/>
+
+  <path d="M210 520 L210 508" class="arrow" opacity="0"/>
+
+  <path d="M210 520 L210 508" class="arrow" opacity="0"/>
+
+  <path d="M210 520 L210 508" class="arrow" opacity="0"/>
+
+  <path d="M210 520 L210 508" class="arrow" opacity="0"/>
+
+  <path d="M210 520 L210 508" class="arrow" opacity="0"/>
+
+  <path d="M210 520 L210 508" class="arrow" opacity="0"/>
+
+  <!-- Re-index flow -->
+  <path d="M210 520 L210 508" class="arrow"/>
+  <path d="M210 508 L210 508" class="arrow" opacity="0"/>
+
+  <!-- Actor -> Automation -->
+  <path d="M760 560 L800 560" class="arrow dashed muted"/> <!-- Durable state to automation? -->
+  <path d="M955 520 L760 330" class="arrow dashed muted"/> <!-- Automation -> Actor dispatch -->
+
+  <!-- Actor -> Safety -->
+  <path d="M760 660 L800 660" class="arrow dashed muted"/> <!-- State/Budgets link (conceptual) -->
+  <path d="M955 620 L760 330" class="arrow dashed muted"/> <!-- Budgets enforce loop -->
+
+  <!-- Actor <-> Subagents -->
+  <path d="M760 260 L800 200" class="arrow dashed muted"/> <!-- Actor delegates -->
+  <path d="M955 226 L760 300" class="arrow dashed muted"/> <!-- Federation results back -->
+
+  <!-- Legend pills -->
+  <rect x="90" y="135" width="120" height="26" class="pill"/>
+  <text x="150" y="153" text-anchor="middle" class="small">Compute</text>
+
+  <rect x="218" y="135" width="120" height="26" class="pill" fill="#ecfeff" stroke="#06b6d4"/>
+  <text x="278" y="153" text-anchor="middle" class="small">Data</text>
+
+  <rect x="346" y="135" width="120" height="26" class="pill" fill="#f0fdf4" stroke="#22c55e"/>
+  <text x="406" y="153" text-anchor="middle" class="small">Ops</text>
+
+  <rect x="474" y="135" width="150" height="26" class="pill" fill="#fff7ed" stroke="#f97316"/>
+  <text x="549" y="153" text-anchor="middle" class="small">Safety</text>
+</svg>

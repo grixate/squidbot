@@ -109,4 +109,44 @@ func TestFromConfig(t *testing.T) {
 			t.Fatal("expected error")
 		}
 	})
+
+	t.Run("moonshot uses default moonshot base", func(t *testing.T) {
+		cfg := config.Default()
+		cfg.Providers.Active = "moonshot"
+		_ = cfg.SetProviderByName("moonshot", config.ProviderConfig{
+			APIKey: "moonshot-key",
+		})
+
+		client, _, err := FromConfig(cfg)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		openaiCompat, ok := client.(*OpenAICompatProvider)
+		if !ok {
+			t.Fatalf("expected OpenAICompatProvider, got %T", client)
+		}
+		if openaiCompat.baseURL != "https://api.moonshot.ai/v1" {
+			t.Fatalf("unexpected base URL: %s", openaiCompat.baseURL)
+		}
+	})
+
+	t.Run("minimax uses default minimax base", func(t *testing.T) {
+		cfg := config.Default()
+		cfg.Providers.Active = "minimax"
+		_ = cfg.SetProviderByName("minimax", config.ProviderConfig{
+			APIKey: "minimax-key",
+		})
+
+		client, _, err := FromConfig(cfg)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		openaiCompat, ok := client.(*OpenAICompatProvider)
+		if !ok {
+			t.Fatalf("expected OpenAICompatProvider, got %T", client)
+		}
+		if openaiCompat.baseURL != "https://api.minimax.io/v1" {
+			t.Fatalf("unexpected base URL: %s", openaiCompat.baseURL)
+		}
+	})
 }
