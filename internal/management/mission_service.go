@@ -29,6 +29,14 @@ var (
 	errConflict = errors.New("conflict")
 )
 
+const (
+	runtimeBranchesNamespace       = "runtime_branches"
+	runtimeCompactionRunsNamespace = "runtime_compaction_runs"
+	runtimeCortexEventsNamespace   = "runtime_cortex_events"
+	runtimeBulletinNamespace       = "runtime_bulletin"
+	runtimeBulletinKey             = "current"
+)
+
 type MissionControlService struct {
 	store        *storepkg.Store
 	configPath   string
@@ -110,8 +118,11 @@ type ConfigSnapshot struct {
 		} `json:"telegram"`
 	} `json:"channels"`
 	Runtime struct {
-		HeartbeatIntervalSec int `json:"heartbeatIntervalSec"`
-		MailboxSize          int `json:"mailboxSize"`
+		HeartbeatIntervalSec int                            `json:"heartbeatIntervalSec"`
+		MailboxSize          int                            `json:"mailboxSize"`
+		Routing              config.RoutingRuntimeConfig    `json:"routing"`
+		Compaction           config.CompactionRuntimeConfig `json:"compaction"`
+		Cortex               config.CortexRuntimeConfig     `json:"cortex"`
 	} `json:"runtime"`
 	Federation struct {
 		Enabled           bool     `json:"enabled"`
@@ -136,6 +147,39 @@ type FileDescriptor struct {
 	Label    string `json:"label"`
 	Path     string `json:"path"`
 	Editable bool   `json:"editable"`
+}
+
+type BranchRunView struct {
+	ID          string    `json:"id"`
+	SessionID   string    `json:"session_id"`
+	Description string    `json:"description"`
+	Prompt      string    `json:"prompt"`
+	Status      string    `json:"status"`
+	Conclusion  string    `json:"conclusion,omitempty"`
+	Error       string    `json:"error,omitempty"`
+	Model       string    `json:"model,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	StartedAt   time.Time `json:"started_at,omitempty"`
+	CompletedAt time.Time `json:"completed_at,omitempty"`
+}
+
+type CompactionRunView struct {
+	SessionID    string    `json:"session_id"`
+	ThresholdHit int       `json:"threshold_hit"`
+	Action       string    `json:"action"`
+	RemovedTurns int       `json:"removed_turns"`
+	Summary      string    `json:"summary,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+type CortexEventView struct {
+	ID         string    `json:"id"`
+	Trigger    string    `json:"trigger"`
+	Status     string    `json:"status"`
+	Preview    string    `json:"preview,omitempty"`
+	Error      string    `json:"error,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+	FinishedAt time.Time `json:"finished_at"`
 }
 
 var editableFiles = map[string]FileDescriptor{
@@ -881,6 +925,9 @@ func (s *MissionControlService) Settings() ConfigSnapshot {
 	out.Channels.Telegram.AllowFrom = cfg.Channels.Telegram.AllowFrom
 	out.Runtime.HeartbeatIntervalSec = cfg.Runtime.HeartbeatIntervalSec
 	out.Runtime.MailboxSize = cfg.Runtime.MailboxSize
+	out.Runtime.Routing = cfg.Runtime.Routing
+	out.Runtime.Compaction = cfg.Runtime.Compaction
+	out.Runtime.Cortex = cfg.Runtime.Cortex
 	out.Federation.Enabled = cfg.Runtime.Federation.Enabled
 	out.Federation.NodeID = cfg.Runtime.Federation.NodeID
 	out.Federation.ListenAddr = cfg.Runtime.Federation.ListenAddr
@@ -1193,6 +1240,207 @@ func (s *MissionControlService) UpdateRuntime(ctx context.Context, heartbeatInte
 	}, nil
 }
 
+func (s *MissionControlService) RuntimeBranches(ctx context.Context, sessionID string, limit int) ([]BranchRunView, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	raw, err := s.store.ListKV(ctx, runtimeBranchesNamespace, "", limit*2)
+	if err != nil {
+		return nil, err
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	out := make([]BranchRunView, 0, len(raw))
+	for _, value := range raw {
+		var run BranchRunView
+		if err := json.Unmarshal(value, &run); err != nil {
+			continue
+		}
+		if sessionID != "" && strings.TrimSpace(run.SessionID) != sessionID {
+			continue
+		}
+		out = append(out, run)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].CreatedAt.After(out[j].CreatedAt)
+	})
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (s *MissionControlService) RuntimeCompactionRuns(ctx context.Context, limit int) ([]CompactionRunView, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	raw, err := s.store.ListKV(ctx, runtimeCompactionRunsNamespace, "", limit*2)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]CompactionRunView, 0, len(raw))
+	for _, value := range raw {
+		var run CompactionRunView
+		if err := json.Unmarshal(value, &run); err != nil {
+			continue
+		}
+		out = append(out, run)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].CreatedAt.After(out[j].CreatedAt)
+	})
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (s *MissionControlService) RuntimeCortexEvents(ctx context.Context, limit int) ([]CortexEventView, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	raw, err := s.store.ListKV(ctx, runtimeCortexEventsNamespace, "", limit*2)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]CortexEventView, 0, len(raw))
+	for _, value := range raw {
+		var event CortexEventView
+		if err := json.Unmarshal(value, &event); err != nil {
+			continue
+		}
+		out = append(out, event)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].CreatedAt.After(out[j].CreatedAt)
+	})
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (s *MissionControlService) Bulletin(ctx context.Context) (string, error) {
+	raw, err := s.store.GetKV(ctx, runtimeBulletinNamespace, runtimeBulletinKey)
+	if err != nil {
+		return "", nil
+	}
+	return strings.TrimSpace(string(raw)), nil
+}
+
+func (s *MissionControlService) RegenerateBulletin(ctx context.Context) (string, error) {
+	cfg := s.getConfig()
+	maxWords := cfg.Runtime.Cortex.BulletinMaxWords
+	if maxWords <= 0 {
+		maxWords = 180
+	}
+	bulletin := s.buildOfflineBulletin(ctx, maxWords)
+	if err := s.store.PutKV(ctx, runtimeBulletinNamespace, runtimeBulletinKey, []byte(bulletin)); err != nil {
+		return "", err
+	}
+	event := CortexEventView{
+		ID:         fmt.Sprintf("cortex-offline-%d", time.Now().UTC().UnixNano()),
+		Trigger:    "manual",
+		Status:     "regenerated_offline",
+		Preview:    truncateLine(bulletin, 180),
+		CreatedAt:  time.Now().UTC(),
+		FinishedAt: time.Now().UTC(),
+	}
+	if raw, err := json.Marshal(event); err == nil {
+		key := fmt.Sprintf("%d:%s", event.CreatedAt.UnixNano(), event.ID)
+		_ = s.store.PutKV(ctx, runtimeCortexEventsNamespace, key, raw)
+	}
+	return bulletin, nil
+}
+
+func (s *MissionControlService) buildOfflineBulletin(ctx context.Context, maxWords int) string {
+	cfg := s.getConfig()
+	workspace := config.WorkspacePath(cfg)
+	curated := ""
+	if raw, err := os.ReadFile(filepath.Join(workspace, "memory", "MEMORY.md")); err == nil {
+		curated = truncateLine(string(raw), 900)
+	}
+	manager := memory.NewManager(cfg)
+	dailyItems := []string{}
+	if manager.Enabled() {
+		if err := manager.EnsureIndex(ctx); err == nil {
+			recent, _ := manager.RecentDaily(ctx, 6)
+			for _, chunk := range recent {
+				dailyItems = append(dailyItems, truncateLine(strings.TrimSpace(chunk.Content), 180))
+			}
+		}
+	}
+	if len(dailyItems) == 0 {
+		dailyItems = append(dailyItems, "none")
+	}
+	body := strings.Join([]string{
+		"Identity: keep responses concise, factual, and execution-oriented.",
+		"Recent memory: " + strings.Join(dailyItems, " | "),
+		"Important context: " + defaultBulletinSection(curated, "no curated memory available"),
+		"Open focus: preserve branch/worker split and compact long sessions safely.",
+	}, "\n")
+	return truncateWords(body, max(maxWords, 60))
+}
+
+func (s *MissionControlService) UpdateRoutingSettings(ctx context.Context, next config.RoutingRuntimeConfig) (map[string]any, error) {
+	_ = ctx
+	cfg := s.getConfig()
+	if next.TaskOverrides == nil {
+		next.TaskOverrides = map[string]string{}
+	}
+	if next.Fallbacks == nil {
+		next.Fallbacks = map[string][]string{}
+	}
+	if next.RateLimitCooldownSec <= 0 {
+		next.RateLimitCooldownSec = 20
+	}
+	cfg.Runtime.Routing = next
+	if err := s.saveConfig(cfg); err != nil {
+		return nil, err
+	}
+	return map[string]any{"ok": true, "restartRequired": true}, nil
+}
+
+func (s *MissionControlService) UpdateCompactionSettings(ctx context.Context, next config.CompactionRuntimeConfig) (map[string]any, error) {
+	_ = ctx
+	cfg := s.getConfig()
+	if next.BackgroundThresholdPct <= 0 {
+		next.BackgroundThresholdPct = 72
+	}
+	if next.AggressiveThresholdPct <= 0 {
+		next.AggressiveThresholdPct = 84
+	}
+	if next.EmergencyThresholdPct <= 0 {
+		next.EmergencyThresholdPct = 94
+	}
+	if next.AggressiveThresholdPct < next.BackgroundThresholdPct {
+		next.AggressiveThresholdPct = next.BackgroundThresholdPct
+	}
+	if next.EmergencyThresholdPct < next.AggressiveThresholdPct {
+		next.EmergencyThresholdPct = next.AggressiveThresholdPct
+	}
+	cfg.Runtime.Compaction = next
+	if err := s.saveConfig(cfg); err != nil {
+		return nil, err
+	}
+	return map[string]any{"ok": true, "restartRequired": true}, nil
+}
+
+func (s *MissionControlService) UpdateCortexSettings(ctx context.Context, next config.CortexRuntimeConfig) (map[string]any, error) {
+	_ = ctx
+	cfg := s.getConfig()
+	if next.BulletinIntervalSec <= 0 {
+		next.BulletinIntervalSec = 120
+	}
+	if next.BulletinMaxWords <= 0 {
+		next.BulletinMaxWords = 180
+	}
+	cfg.Runtime.Cortex = next
+	if err := s.saveConfig(cfg); err != nil {
+		return nil, err
+	}
+	return map[string]any{"ok": true, "restartRequired": true}, nil
+}
+
 func (s *MissionControlService) UpdatePassword(ctx context.Context, currentPassword, nextPassword string, minLength int) (map[string]any, error) {
 	_ = ctx
 	currentPassword = strings.TrimSpace(currentPassword)
@@ -1272,6 +1520,33 @@ func truncateLine(in string, max int) string {
 		return trimmed
 	}
 	return trimmed[:max-3] + "..."
+}
+
+func truncateWords(in string, maxWords int) string {
+	trimmed := strings.TrimSpace(in)
+	if trimmed == "" || maxWords <= 0 {
+		return trimmed
+	}
+	words := strings.Fields(trimmed)
+	if len(words) <= maxWords {
+		return strings.Join(words, " ")
+	}
+	return strings.Join(words[:maxWords], " ") + "..."
+}
+
+func defaultBulletinSection(value, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback
+	}
+	return value
+}
+
+func max(a, b int) int {
+	if a < b {
+		return b
+	}
+	return a
 }
 
 func toRFC3339(value any) string {

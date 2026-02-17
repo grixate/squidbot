@@ -21,19 +21,19 @@ import (
 )
 
 var (
-	bucketSessions         = []byte("sessions")
-	bucketTurns            = []byte("turns")
-	bucketToolEvents       = []byte("tool_events")
-	bucketJobs             = []byte("jobs")
-	bucketJobRuns          = []byte("job_runs")
-	bucketKV               = []byte("kv")
-	bucketActorCheckpoints = []byte("actor_checkpoints")
-	bucketSchemaMigrations = []byte("schema_migrations")
-	bucketMissionTasks     = []byte("mission_tasks")
-	bucketMissionColumns   = []byte("mission_columns")
-	bucketUsageDaily       = []byte("usage_daily")
-	bucketHeartbeatRuns    = []byte("heartbeat_runs")
-	bucketFederationRuns   = []byte("federation_runs")
+	bucketSessions            = []byte("sessions")
+	bucketTurns               = []byte("turns")
+	bucketToolEvents          = []byte("tool_events")
+	bucketJobs                = []byte("jobs")
+	bucketJobRuns             = []byte("job_runs")
+	bucketKV                  = []byte("kv")
+	bucketActorCheckpoints    = []byte("actor_checkpoints")
+	bucketSchemaMigrations    = []byte("schema_migrations")
+	bucketMissionTasks        = []byte("mission_tasks")
+	bucketMissionColumns      = []byte("mission_columns")
+	bucketUsageDaily          = []byte("usage_daily")
+	bucketHeartbeatRuns       = []byte("heartbeat_runs")
+	bucketFederationRuns      = []byte("federation_runs")
 	bucketFederationPeerState = []byte("federation_peer_health")
 )
 
@@ -288,6 +288,48 @@ func (s *Store) GetKV(_ context.Context, namespace, key string) ([]byte, error) 
 	if errors.Is(err, bbolt.ErrBucketNotFound) {
 		return nil, fmt.Errorf("kv value not found")
 	}
+	return out, err
+}
+
+func (s *Store) DeleteKV(ctx context.Context, namespace, key string) error {
+	namespace = strings.TrimSpace(namespace)
+	key = strings.TrimSpace(key)
+	if namespace == "" || key == "" {
+		return fmt.Errorf("namespace and key are required")
+	}
+	return s.runWrite(ctx, func(tx *bbolt.Tx) error {
+		return tx.Bucket(bucketKV).Delete([]byte(kvKey(namespace, key)))
+	})
+}
+
+func (s *Store) ListKV(_ context.Context, namespace, prefix string, limit int) (map[string][]byte, error) {
+	namespace = strings.TrimSpace(namespace)
+	if namespace == "" {
+		return nil, fmt.Errorf("namespace is required")
+	}
+	prefix = strings.TrimSpace(prefix)
+	fullPrefix := []byte(kvKey(namespace, prefix))
+	if prefix == "" {
+		fullPrefix = []byte("kv:" + namespace + ":")
+	}
+	if limit <= 0 {
+		limit = 200
+	}
+	out := map[string][]byte{}
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket(bucketKV)
+		cursor := bucket.Cursor()
+		count := 0
+		for key, value := cursor.Seek(fullPrefix); key != nil && strings.HasPrefix(string(key), string(fullPrefix)); key, value = cursor.Next() {
+			rawKey := strings.TrimPrefix(string(key), "kv:"+namespace+":")
+			out[rawKey] = append([]byte(nil), value...)
+			count++
+			if count >= limit {
+				break
+			}
+		}
+		return nil
+	})
 	return out, err
 }
 

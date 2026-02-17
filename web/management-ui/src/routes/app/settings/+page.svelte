@@ -24,7 +24,31 @@
   type Settings = {
     providers: { active: string; items: ProviderItem[] };
     channels: { telegram: { enabled: boolean; tokenSet: boolean; allowFrom: string[] }; items?: Record<string, ChannelItem> };
-    runtime: { heartbeatIntervalSec: number; mailboxSize: number };
+    runtime: {
+      heartbeatIntervalSec: number;
+      mailboxSize: number;
+      routing?: {
+        channelModel?: string;
+        branchModel?: string;
+        workerModel?: string;
+        compactorModel?: string;
+        cortexModel?: string;
+        taskOverrides?: Record<string, string>;
+        fallbacks?: Record<string, string[]>;
+        rateLimitCooldownSec?: number;
+      };
+      compaction?: {
+        enabled: boolean;
+        backgroundThresholdPct: number;
+        aggressiveThresholdPct: number;
+        emergencyThresholdPct: number;
+      };
+      cortex?: {
+        enabled: boolean;
+        bulletinIntervalSec: number;
+        bulletinMaxWords: number;
+      };
+    };
     management: { host: string; port: number; publicBaseUrl: string; serveInGateway: boolean };
   };
 
@@ -50,6 +74,21 @@
 
   let heartbeatIntervalSec = 1800;
   let mailboxSize = 64;
+  let routingChannelModel = '';
+  let routingBranchModel = '';
+  let routingWorkerModel = '';
+  let routingCompactorModel = '';
+  let routingCortexModel = '';
+  let routingTaskOverrides = '{}';
+  let routingFallbacks = '{}';
+  let routingRateLimitCooldownSec = 20;
+  let compactionEnabled = true;
+  let compactionBackgroundThresholdPct = 72;
+  let compactionAggressiveThresholdPct = 84;
+  let compactionEmergencyThresholdPct = 94;
+  let cortexEnabled = true;
+  let cortexBulletinIntervalSec = 120;
+  let cortexBulletinMaxWords = 180;
 
   let currentPassword = '';
   let newPassword = '';
@@ -87,6 +126,21 @@
       hydrateChannelSelection();
       heartbeatIntervalSec = settings.runtime.heartbeatIntervalSec || 1800;
       mailboxSize = settings.runtime.mailboxSize || 64;
+      routingChannelModel = settings.runtime.routing?.channelModel || '';
+      routingBranchModel = settings.runtime.routing?.branchModel || '';
+      routingWorkerModel = settings.runtime.routing?.workerModel || '';
+      routingCompactorModel = settings.runtime.routing?.compactorModel || '';
+      routingCortexModel = settings.runtime.routing?.cortexModel || '';
+      routingTaskOverrides = JSON.stringify(settings.runtime.routing?.taskOverrides || {}, null, 2);
+      routingFallbacks = JSON.stringify(settings.runtime.routing?.fallbacks || {}, null, 2);
+      routingRateLimitCooldownSec = settings.runtime.routing?.rateLimitCooldownSec || 20;
+      compactionEnabled = settings.runtime.compaction?.enabled ?? true;
+      compactionBackgroundThresholdPct = settings.runtime.compaction?.backgroundThresholdPct ?? 72;
+      compactionAggressiveThresholdPct = settings.runtime.compaction?.aggressiveThresholdPct ?? 84;
+      compactionEmergencyThresholdPct = settings.runtime.compaction?.emergencyThresholdPct ?? 94;
+      cortexEnabled = settings.runtime.cortex?.enabled ?? true;
+      cortexBulletinIntervalSec = settings.runtime.cortex?.bulletinIntervalSec ?? 120;
+      cortexBulletinMaxWords = settings.runtime.cortex?.bulletinMaxWords ?? 180;
     } catch (err) {
       error = parseError(err);
     } finally {
@@ -189,6 +243,74 @@
         body: JSON.stringify({ heartbeatIntervalSec, mailboxSize })
       });
       success = 'Runtime settings saved.';
+      await loadData();
+    } catch (err) {
+      error = parseError(err);
+    }
+  }
+
+  async function saveRouting() {
+    error = '';
+    success = '';
+    try {
+      const taskOverrides = JSON.parse(routingTaskOverrides || '{}');
+      const fallbacks = JSON.parse(routingFallbacks || '{}');
+      await fetchJSON('/api/manage/settings/routing', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          channelModel: routingChannelModel,
+          branchModel: routingBranchModel,
+          workerModel: routingWorkerModel,
+          compactorModel: routingCompactorModel,
+          cortexModel: routingCortexModel,
+          taskOverrides,
+          fallbacks,
+          rateLimitCooldownSec: routingRateLimitCooldownSec
+        })
+      });
+      success = 'Routing settings saved.';
+      await loadData();
+    } catch (err) {
+      error = parseError(err);
+    }
+  }
+
+  async function saveCompaction() {
+    error = '';
+    success = '';
+    try {
+      await fetchJSON('/api/manage/settings/compaction', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          enabled: compactionEnabled,
+          backgroundThresholdPct: compactionBackgroundThresholdPct,
+          aggressiveThresholdPct: compactionAggressiveThresholdPct,
+          emergencyThresholdPct: compactionEmergencyThresholdPct
+        })
+      });
+      success = 'Compaction settings saved.';
+      await loadData();
+    } catch (err) {
+      error = parseError(err);
+    }
+  }
+
+  async function saveCortex() {
+    error = '';
+    success = '';
+    try {
+      await fetchJSON('/api/manage/settings/cortex', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          enabled: cortexEnabled,
+          bulletinIntervalSec: cortexBulletinIntervalSec,
+          bulletinMaxWords: cortexBulletinMaxWords
+        })
+      });
+      success = 'Cortex settings saved.';
       await loadData();
     } catch (err) {
       error = parseError(err);
@@ -314,6 +436,63 @@
         <Button.Root type="button" onclick={savePassword}>Update Password</Button.Root>
       </section>
     </div>
+
+    <div class="split-grid">
+      <section class="panel">
+        <h3>Routing</h3>
+        <label for="routing-channel-model">Channel Model</label>
+        <input id="routing-channel-model" bind:value={routingChannelModel} type="text" />
+        <label for="routing-branch-model">Branch Model</label>
+        <input id="routing-branch-model" bind:value={routingBranchModel} type="text" />
+        <label for="routing-worker-model">Worker Model</label>
+        <input id="routing-worker-model" bind:value={routingWorkerModel} type="text" />
+        <label for="routing-compactor-model">Compactor Model</label>
+        <input id="routing-compactor-model" bind:value={routingCompactorModel} type="text" />
+        <label for="routing-cortex-model">Cortex Model</label>
+        <input id="routing-cortex-model" bind:value={routingCortexModel} type="text" />
+        <label for="routing-task-overrides">Task Overrides (JSON)</label>
+        <textarea id="routing-task-overrides" rows={5} bind:value={routingTaskOverrides}></textarea>
+        <label for="routing-fallbacks">Fallbacks (JSON)</label>
+        <textarea id="routing-fallbacks" rows={5} bind:value={routingFallbacks}></textarea>
+        <label for="routing-cooldown">Rate Limit Cooldown (sec)</label>
+        <input id="routing-cooldown" type="number" min="0" bind:value={routingRateLimitCooldownSec} />
+        <Button.Root type="button" onclick={saveRouting}>Save Routing</Button.Root>
+      </section>
+
+      <section class="panel">
+        <h3>Compaction</h3>
+        <label class="checkbox" for="compaction-enabled">
+          <input id="compaction-enabled" type="checkbox" bind:checked={compactionEnabled} />
+          Enable Compaction
+        </label>
+        <label for="compaction-bg">Background Threshold (%)</label>
+        <input id="compaction-bg" type="number" min="1" max="100" bind:value={compactionBackgroundThresholdPct} />
+        <label for="compaction-aggr">Aggressive Threshold (%)</label>
+        <input id="compaction-aggr" type="number" min="1" max="100" bind:value={compactionAggressiveThresholdPct} />
+        <label for="compaction-emergency">Emergency Threshold (%)</label>
+        <input
+          id="compaction-emergency"
+          type="number"
+          min="1"
+          max="100"
+          bind:value={compactionEmergencyThresholdPct}
+        />
+        <Button.Root type="button" onclick={saveCompaction}>Save Compaction</Button.Root>
+      </section>
+    </div>
+
+    <section class="panel">
+      <h3>Cortex</h3>
+      <label class="checkbox" for="cortex-enabled">
+        <input id="cortex-enabled" type="checkbox" bind:checked={cortexEnabled} />
+        Enable Cortex
+      </label>
+      <label for="cortex-interval">Bulletin Interval (sec)</label>
+      <input id="cortex-interval" type="number" min="1" bind:value={cortexBulletinIntervalSec} />
+      <label for="cortex-max-words">Bulletin Max Words</label>
+      <input id="cortex-max-words" type="number" min="10" bind:value={cortexBulletinMaxWords} />
+      <Button.Root type="button" onclick={saveCortex}>Save Cortex</Button.Root>
+    </section>
   {/if}
 
   {#if success}

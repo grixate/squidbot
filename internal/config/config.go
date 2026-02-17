@@ -126,10 +126,37 @@ type StorageConfig struct {
 }
 
 type RuntimeConfig struct {
-	MailboxSize          int           `json:"mailboxSize"`
-	ActorIdleTTL         DurationValue `json:"actorIdleTtl"`
-	HeartbeatIntervalSec int           `json:"heartbeatIntervalSec"`
+	MailboxSize          int                     `json:"mailboxSize"`
+	ActorIdleTTL         DurationValue           `json:"actorIdleTtl"`
+	HeartbeatIntervalSec int                     `json:"heartbeatIntervalSec"`
 	Federation           FederationRuntimeConfig `json:"federation"`
+	Routing              RoutingRuntimeConfig    `json:"routing"`
+	Compaction           CompactionRuntimeConfig `json:"compaction"`
+	Cortex               CortexRuntimeConfig     `json:"cortex"`
+}
+
+type RoutingRuntimeConfig struct {
+	ChannelModel         string              `json:"channelModel,omitempty"`
+	BranchModel          string              `json:"branchModel,omitempty"`
+	WorkerModel          string              `json:"workerModel,omitempty"`
+	CompactorModel       string              `json:"compactorModel,omitempty"`
+	CortexModel          string              `json:"cortexModel,omitempty"`
+	TaskOverrides        map[string]string   `json:"taskOverrides,omitempty"`
+	Fallbacks            map[string][]string `json:"fallbacks,omitempty"`
+	RateLimitCooldownSec int                 `json:"rateLimitCooldownSec"`
+}
+
+type CompactionRuntimeConfig struct {
+	Enabled                bool `json:"enabled"`
+	BackgroundThresholdPct int  `json:"backgroundThresholdPct"`
+	AggressiveThresholdPct int  `json:"aggressiveThresholdPct"`
+	EmergencyThresholdPct  int  `json:"emergencyThresholdPct"`
+}
+
+type CortexRuntimeConfig struct {
+	Enabled             bool `json:"enabled"`
+	BulletinIntervalSec int  `json:"bulletinIntervalSec"`
+	BulletinMaxWords    int  `json:"bulletinMaxWords"`
 }
 
 type MemoryConfig struct {
@@ -142,16 +169,16 @@ type MemoryConfig struct {
 }
 
 type FederationPeerConfig struct {
-	ID            string   `json:"id"`
-	BaseURL       string   `json:"baseUrl"`
-	AuthToken     string   `json:"authToken,omitempty"`
-	Enabled       bool     `json:"enabled"`
-	Capabilities  []string `json:"capabilities,omitempty"`
-	Roles         []string `json:"roles,omitempty"`
-	Priority      int      `json:"priority"`
-	MaxConcurrent int      `json:"maxConcurrent"`
-	MaxQueue      int      `json:"maxQueue"`
-	HealthEndpoint string  `json:"healthEndpoint,omitempty"`
+	ID             string   `json:"id"`
+	BaseURL        string   `json:"baseUrl"`
+	AuthToken      string   `json:"authToken,omitempty"`
+	Enabled        bool     `json:"enabled"`
+	Capabilities   []string `json:"capabilities,omitempty"`
+	Roles          []string `json:"roles,omitempty"`
+	Priority       int      `json:"priority"`
+	MaxConcurrent  int      `json:"maxConcurrent"`
+	MaxQueue       int      `json:"maxQueue"`
+	HealthEndpoint string   `json:"healthEndpoint,omitempty"`
 }
 
 type FederationRuntimeConfig struct {
@@ -306,6 +333,22 @@ func Default() Config {
 				AutoFallback:      true,
 				Peers:             []FederationPeerConfig{},
 			},
+			Routing: RoutingRuntimeConfig{
+				TaskOverrides:        map[string]string{},
+				Fallbacks:            map[string][]string{},
+				RateLimitCooldownSec: 20,
+			},
+			Compaction: CompactionRuntimeConfig{
+				Enabled:                true,
+				BackgroundThresholdPct: 72,
+				AggressiveThresholdPct: 84,
+				EmergencyThresholdPct:  94,
+			},
+			Cortex: CortexRuntimeConfig{
+				Enabled:             true,
+				BulletinIntervalSec: 120,
+				BulletinMaxWords:    180,
+			},
 		},
 		Memory: MemoryConfig{
 			Enabled:            true,
@@ -364,6 +407,7 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		if os.IsNotExist(err) {
 			applyEnvOverrides(&cfg)
+			normalizeAdvancedRuntimeConfig(&cfg)
 			return cfg, nil
 		}
 		return cfg, err
@@ -374,6 +418,7 @@ func Load(path string) (Config, error) {
 	migrateLegacyProviders(&cfg)
 	migrateLegacyChannels(&cfg)
 	applyEnvOverrides(&cfg)
+	normalizeAdvancedRuntimeConfig(&cfg)
 	return cfg, nil
 }
 
@@ -504,10 +549,66 @@ func applyEnvOverrides(cfg *Config) {
 			cfg.Runtime.Federation.AutoFallback = parsed
 		}
 	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_RUNTIME_ROUTING_CHANNEL_MODEL")); value != "" {
+		cfg.Runtime.Routing.ChannelModel = value
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_RUNTIME_ROUTING_BRANCH_MODEL")); value != "" {
+		cfg.Runtime.Routing.BranchModel = value
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_RUNTIME_ROUTING_WORKER_MODEL")); value != "" {
+		cfg.Runtime.Routing.WorkerModel = value
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_RUNTIME_ROUTING_COMPACTOR_MODEL")); value != "" {
+		cfg.Runtime.Routing.CompactorModel = value
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_RUNTIME_ROUTING_CORTEX_MODEL")); value != "" {
+		cfg.Runtime.Routing.CortexModel = value
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_RUNTIME_ROUTING_RATE_LIMIT_COOLDOWN_SEC")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed >= 0 {
+			cfg.Runtime.Routing.RateLimitCooldownSec = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_RUNTIME_COMPACTION_ENABLED")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			cfg.Runtime.Compaction.Enabled = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_RUNTIME_COMPACTION_BACKGROUND_THRESHOLD_PCT")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil {
+			cfg.Runtime.Compaction.BackgroundThresholdPct = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_RUNTIME_COMPACTION_AGGRESSIVE_THRESHOLD_PCT")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil {
+			cfg.Runtime.Compaction.AggressiveThresholdPct = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_RUNTIME_COMPACTION_EMERGENCY_THRESHOLD_PCT")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil {
+			cfg.Runtime.Compaction.EmergencyThresholdPct = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_RUNTIME_CORTEX_ENABLED")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			cfg.Runtime.Cortex.Enabled = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_RUNTIME_CORTEX_BULLETIN_INTERVAL_SEC")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.Runtime.Cortex.BulletinIntervalSec = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_RUNTIME_CORTEX_BULLETIN_MAX_WORDS")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.Runtime.Cortex.BulletinMaxWords = parsed
+		}
+	}
 	applyDynamicProviderEnvOverrides(cfg)
 	applyDynamicChannelEnvOverrides(cfg)
 	migrateLegacyProviders(cfg)
 	migrateLegacyChannels(cfg)
+	normalizeAdvancedRuntimeConfig(cfg)
 }
 
 func splitCSV(value string) []string {
@@ -521,6 +622,42 @@ func splitCSV(value string) []string {
 		out = append(out, trimmed)
 	}
 	return out
+}
+
+func normalizeAdvancedRuntimeConfig(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	if cfg.Runtime.Routing.TaskOverrides == nil {
+		cfg.Runtime.Routing.TaskOverrides = map[string]string{}
+	}
+	if cfg.Runtime.Routing.Fallbacks == nil {
+		cfg.Runtime.Routing.Fallbacks = map[string][]string{}
+	}
+	if cfg.Runtime.Routing.RateLimitCooldownSec <= 0 {
+		cfg.Runtime.Routing.RateLimitCooldownSec = 20
+	}
+	if cfg.Runtime.Compaction.BackgroundThresholdPct <= 0 {
+		cfg.Runtime.Compaction.BackgroundThresholdPct = 72
+	}
+	if cfg.Runtime.Compaction.AggressiveThresholdPct <= 0 {
+		cfg.Runtime.Compaction.AggressiveThresholdPct = 84
+	}
+	if cfg.Runtime.Compaction.EmergencyThresholdPct <= 0 {
+		cfg.Runtime.Compaction.EmergencyThresholdPct = 94
+	}
+	if cfg.Runtime.Compaction.AggressiveThresholdPct < cfg.Runtime.Compaction.BackgroundThresholdPct {
+		cfg.Runtime.Compaction.AggressiveThresholdPct = cfg.Runtime.Compaction.BackgroundThresholdPct
+	}
+	if cfg.Runtime.Compaction.EmergencyThresholdPct < cfg.Runtime.Compaction.AggressiveThresholdPct {
+		cfg.Runtime.Compaction.EmergencyThresholdPct = cfg.Runtime.Compaction.AggressiveThresholdPct
+	}
+	if cfg.Runtime.Cortex.BulletinIntervalSec <= 0 {
+		cfg.Runtime.Cortex.BulletinIntervalSec = 120
+	}
+	if cfg.Runtime.Cortex.BulletinMaxWords <= 0 {
+		cfg.Runtime.Cortex.BulletinMaxWords = 180
+	}
 }
 
 func (c Config) PrimaryProvider() (name string, provider ProviderConfig) {

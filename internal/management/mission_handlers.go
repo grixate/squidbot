@@ -278,6 +278,90 @@ func (s *Server) handleManageMemorySearch(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, map[string]any{"results": chunks})
 }
 
+func (s *Server) handleManageMemoryBulletin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	bulletin, err := s.mission.Bulletin(r.Context())
+	if err != nil {
+		writeManageError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"bulletin": bulletin})
+}
+
+func (s *Server) handleManageMemoryBulletinRegenerate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	bulletin, err := s.mission.RegenerateBulletin(r.Context())
+	if err != nil {
+		writeManageError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"bulletin": bulletin})
+}
+
+func (s *Server) handleManageRuntimeBranches(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	sessionID := strings.TrimSpace(r.URL.Query().Get("session"))
+	limit := 100
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+	runs, err := s.mission.RuntimeBranches(r.Context(), sessionID, limit)
+	if err != nil {
+		writeManageError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"branches": runs})
+}
+
+func (s *Server) handleManageRuntimeCompactionRuns(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	limit := 100
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+	runs, err := s.mission.RuntimeCompactionRuns(r.Context(), limit)
+	if err != nil {
+		writeManageError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"runs": runs})
+}
+
+func (s *Server) handleManageRuntimeCortexEvents(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	limit := 100
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+	events, err := s.mission.RuntimeCortexEvents(r.Context(), limit)
+	if err != nil {
+		writeManageError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"events": events})
+}
+
 func (s *Server) handleManageFiles(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -503,6 +587,69 @@ func (s *Server) handleManageSettingsRuntime(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleManageSettingsRouting(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, s.mission.Settings().Runtime.Routing)
+	case http.MethodPut:
+		var req config.RoutingRuntimeConfig
+		if err := readJSON(r.Body, &req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		out, err := s.mission.UpdateRoutingSettings(r.Context(), req)
+		if err != nil {
+			writeManageError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, out)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleManageSettingsCompaction(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, s.mission.Settings().Runtime.Compaction)
+	case http.MethodPut:
+		var req config.CompactionRuntimeConfig
+		if err := readJSON(r.Body, &req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		out, err := s.mission.UpdateCompactionSettings(r.Context(), req)
+		if err != nil {
+			writeManageError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, out)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleManageSettingsCortex(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, s.mission.Settings().Runtime.Cortex)
+	case http.MethodPut:
+		var req config.CortexRuntimeConfig
+		if err := readJSON(r.Body, &req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		out, err := s.mission.UpdateCortexSettings(r.Context(), req)
+		if err != nil {
+			writeManageError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, out)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 func (s *Server) handleManageSettingsPassword(w http.ResponseWriter, r *http.Request) {

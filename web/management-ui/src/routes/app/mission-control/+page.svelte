@@ -33,11 +33,40 @@
     tokenWeek: { total_tokens: number; prompt_tokens: number; completion_tokens: number };
   };
 
+  type BranchRun = {
+    id: string;
+    session_id: string;
+    description?: string;
+    status: string;
+    conclusion?: string;
+    created_at?: string;
+    completed_at?: string;
+  };
+
+  type CompactionRun = {
+    session_id: string;
+    threshold_hit: number;
+    action: string;
+    removed_turns: number;
+    created_at?: string;
+  };
+
+  type CortexEvent = {
+    id: string;
+    trigger: string;
+    status: string;
+    preview?: string;
+    created_at?: string;
+  };
+
   let loading = true;
   let error = '';
   let overview: Overview | null = null;
   let columns: Column[] = [];
   let tasks: Task[] = [];
+  let branchRuns: BranchRun[] = [];
+  let compactionRuns: CompactionRun[] = [];
+  let cortexEvents: CortexEvent[] = [];
 
   let newTitle = '';
   let newDescription = '';
@@ -49,13 +78,19 @@
     loading = true;
     error = '';
     try {
-      const [overviewResp, boardResp] = await Promise.all([
+      const [overviewResp, boardResp, branchesResp, compactionResp, cortexResp] = await Promise.all([
         fetchJSON<Overview>('/api/manage/overview'),
-        fetchJSON<{ columns: Column[]; tasks: Task[] }>('/api/manage/kanban')
+        fetchJSON<{ columns: Column[]; tasks: Task[] }>('/api/manage/kanban'),
+        fetchJSON<{ branches: BranchRun[] }>('/api/manage/runtime/branches?limit=8'),
+        fetchJSON<{ runs: CompactionRun[] }>('/api/manage/runtime/compaction/runs?limit=8'),
+        fetchJSON<{ events: CortexEvent[] }>('/api/manage/runtime/cortex/events?limit=8')
       ]);
       overview = overviewResp;
       columns = boardResp.columns || [];
       tasks = boardResp.tasks || [];
+      branchRuns = branchesResp.branches || [];
+      compactionRuns = compactionResp.runs || [];
+      cortexEvents = cortexResp.events || [];
     } catch (err) {
       error = parseError(err);
     } finally {
@@ -235,6 +270,59 @@
           </div>
         </article>
       {/each}
+    </section>
+
+    <div class="split-grid">
+      <section class="panel">
+        <h3>Branches</h3>
+        {#if branchRuns.length === 0}
+          <p class="muted">No branch runs yet.</p>
+        {:else}
+          <ul class="memory-results">
+            {#each branchRuns as run}
+              <li>
+                <p><strong>{run.status}</strong> {run.description || run.id}</p>
+                {#if run.conclusion}
+                  <p>{run.conclusion}</p>
+                {/if}
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </section>
+      <section class="panel">
+        <h3>Compaction</h3>
+        {#if compactionRuns.length === 0}
+          <p class="muted">No compaction runs yet.</p>
+        {:else}
+          <ul class="memory-results">
+            {#each compactionRuns as run}
+              <li>
+                <p><strong>{run.action}</strong> ({run.threshold_hit}% utilization)</p>
+                <p>{run.removed_turns} turns removed from {run.session_id}</p>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </section>
+    </div>
+
+    <section class="panel">
+      <h3>Cortex Events</h3>
+      {#if cortexEvents.length === 0}
+        <p class="muted">No cortex events yet.</p>
+      {:else}
+        <ul class="memory-results">
+          {#each cortexEvents as event}
+            <li>
+              <p><strong>{event.status}</strong> ({event.trigger})</p>
+              {#if event.preview}
+                <p>{event.preview}</p>
+              {/if}
+            </li>
+          {/each}
+        </ul>
+      {/if}
     </section>
   {/if}
 

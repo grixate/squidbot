@@ -23,6 +23,7 @@
 
   let query = '';
   let searchResults: SearchResult[] = [];
+  let bulletin = '';
 
   async function loadFiles() {
     const response = await fetchJSON<{ files: FileDescriptor[] }>('/api/manage/files');
@@ -71,10 +72,28 @@
     }
   }
 
+  async function loadBulletin() {
+    const response = await fetchJSON<{ bulletin: string }>('/api/manage/memory/bulletin');
+    bulletin = response.bulletin || '';
+  }
+
+  async function regenerateBulletin() {
+    error = '';
+    try {
+      const response = await fetchJSON<{ bulletin: string }>('/api/manage/memory/bulletin/regenerate', {
+        method: 'POST'
+      });
+      bulletin = response.bulletin || bulletin;
+    } catch (err) {
+      error = parseError(err);
+    }
+  }
+
   onMount(async () => {
     loading = true;
     try {
       await loadFiles();
+      await loadBulletin();
     } catch (err) {
       error = parseError(err);
     } finally {
@@ -93,6 +112,17 @@
   {#if loading}
     <p class="muted">Loading...</p>
   {:else}
+    <div class="split-grid">
+      <section class="panel">
+        <h3>Cortex Bulletin</h3>
+        <p>{bulletin || 'No bulletin yet.'}</p>
+        <div class="inline">
+          <Button.Root type="button" onclick={loadBulletin}>Refresh</Button.Root>
+          <Button.Root type="button" onclick={regenerateBulletin}>Regenerate</Button.Root>
+        </div>
+      </section>
+    </div>
+
     <div class="split-grid">
       <section class="panel">
         <h3>Search Memory</h3>
