@@ -74,7 +74,7 @@ func (e *Engine) buildAdaptiveMessages(
 	if stageOverride != nil {
 		stage = *stageOverride
 	} else {
-		baseOptions := e.promptBuildOptionsForStage(cfg, contextctrl.StageNone, summary.Content)
+		baseOptions := e.promptBuildOptionsForStage(ctx, cfg, contextctrl.StageNone, summary.Content)
 		baseMessages := buildMessages(
 			buildSystemPromptWithSkillsAndOptions(cfg, userMessage, &activation, baseOptions),
 			historyAll,
@@ -116,7 +116,7 @@ func (e *Engine) buildAdaptiveMessages(
 			summary = record
 		}
 	}
-	options := e.promptBuildOptionsForStage(cfg, stage, summary.Content)
+	options := e.promptBuildOptionsForStage(ctx, cfg, stage, summary.Content)
 	history := lastMessages(historyAll, historyLimit)
 	systemPrompt := buildSystemPromptWithSkillsAndOptions(cfg, userMessage, &activation, options)
 	messages := buildMessages(systemPrompt, history, userMessage)
@@ -128,7 +128,7 @@ func (e *Engine) buildAdaptiveMessages(
 		if historyLimit > len(historyAll) {
 			historyLimit = len(historyAll)
 		}
-		options = e.promptBuildOptionsForStage(cfg, stage, summary.Content)
+		options = e.promptBuildOptionsForStage(ctx, cfg, stage, summary.Content)
 		history = lastMessages(historyAll, historyLimit)
 		systemPrompt = buildSystemPromptWithSkillsAndOptions(cfg, userMessage, &activation, options)
 		messages = buildMessages(systemPrompt, history, userMessage)
@@ -181,12 +181,13 @@ func (e *Engine) historyLimitForStage(cfg config.Config, stage contextctrl.Stage
 	}
 }
 
-func (e *Engine) promptBuildOptionsForStage(cfg config.Config, stage contextctrl.Stage, summary string) PromptBuildOptions {
+func (e *Engine) promptBuildOptionsForStage(ctx context.Context, cfg config.Config, stage contextctrl.Stage, summary string) PromptBuildOptions {
 	options := defaultPromptBuildOptions(cfg)
 	options.BootstrapMaxChars = max(cfg.ContextControl.BootstrapMaxChars, 256)
 	options.MemorySnippetMaxChars = max(cfg.ContextControl.MemorySnippetMaxChars, 80)
 	options.SkillPromptMaxChars = max(cfg.ContextControl.SkillPromptMaxChars, 400)
 	options.SessionSummary = summary
+	options.Bulletin = e.currentCortexBulletin(ctx)
 	switch stage {
 	case contextctrl.Stage1:
 		options.BootstrapMaxChars = max(options.BootstrapMaxChars*70/100, 256)
@@ -257,10 +258,6 @@ func (e *Engine) buildSessionSummary(ctx context.Context, cfg config.Config, mod
 	if !cfg.ContextControl.Summary.Enabled || strings.TrimSpace(cfg.ContextControl.Summary.Method) != "model_written" {
 		return deterministic, nil
 	}
-	providerClient, _ := e.currentProviderModel()
-	if providerClient == nil {
-		return deterministic, fmt.Errorf("provider is not configured")
-	}
 	trimmed := lastMessages(droppedTurns, limitInput)
 	lines := make([]string, 0, len(trimmed))
 	for _, msg := range trimmed {
@@ -291,7 +288,7 @@ func (e *Engine) buildSessionSummary(ctx context.Context, cfg config.Config, mod
 	if maxSummaryTokens > 512 {
 		maxSummaryTokens = 512
 	}
-	resp, err := providerClient.Chat(ctx, provider.ChatRequest{
+	resp, _, err := e.chatWithRouting(ctx, "compactor", "session_summary", provider.ChatRequest{
 		Messages: []provider.Message{
 			{
 				Role:    "system",
@@ -302,7 +299,7 @@ func (e *Engine) buildSessionSummary(ctx context.Context, cfg config.Config, mod
 				Content: prompt,
 			},
 		},
-		Model:       model,
+		Model:       e.primaryModelForProcess("compactor", "session_summary"),
 		MaxTokens:   maxSummaryTokens,
 		Temperature: 0.1,
 	})

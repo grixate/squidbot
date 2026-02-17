@@ -40,6 +40,7 @@ type PromptBuildOptions struct {
 	RecentDailyLimit       int
 	SkillPromptMaxChars    int
 	SessionSummary         string
+	Bulletin               string
 }
 
 func defaultPromptBuildOptions(cfg config.Config) PromptBuildOptions {
@@ -146,6 +147,9 @@ func buildSystemPromptWithSkillsAndOptions(cfg config.Config, userMessage string
 
 	if summary := strings.TrimSpace(options.SessionSummary); summary != "" {
 		parts = append(parts, "## Session Summary\n\n"+truncateText(summary, options.BootstrapMaxChars))
+	}
+	if bulletin := strings.TrimSpace(options.Bulletin); bulletin != "" {
+		parts = append(parts, "## Cortex Bulletin\n\n"+truncateText(bulletin, options.BootstrapMaxChars))
 	}
 
 	if options.IncludeSkills {
