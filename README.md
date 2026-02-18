@@ -7,6 +7,10 @@ Go-native personal AI assistant with Telegram integration, actor-based session r
 - Session actor runtime with bounded mailboxes and idle eviction
 - BoltDB primary storage (`~/.squidbot/data/squidbot.db`)
 - SQLite memory index for markdown-based retrieval (`~/.squidbot/data/memory_index.db`)
+- Channel-Branch-Worker runtime model
+- Background compaction runs with threshold-based actions
+- Cortex bulletin synthesis with prompt injection
+- Process-aware model routing (channel/branch/worker/compactor/cortex)
 - Tool loop with typed tool argument boundaries
 - Provider adapters for OpenRouter, Anthropic, OpenAI, Gemini, Ollama, LM Studio, Moonshot AI, and MiniMax
 - Mandatory provider-gated onboarding before runtime commands
@@ -16,6 +20,17 @@ Go-native personal AI assistant with Telegram integration, actor-based session r
 - Auto-discovered skill contracts from `skills/**/SKILL.md`
 - Episodic daily memory logs in `memory/daily/YYYY-MM-DD.md`
 - Structured runtime metrics counters
+- Runtime observability endpoints:
+  - `/api/manage/runtime/branches`
+  - `/api/manage/runtime/compaction/runs`
+  - `/api/manage/runtime/cortex/events`
+- Bulletin management endpoints:
+  - `/api/manage/memory/bulletin`
+  - `/api/manage/memory/bulletin/regenerate`
+- Runtime settings endpoints:
+  - `/api/manage/settings/routing`
+  - `/api/manage/settings/compaction`
+  - `/api/manage/settings/cortex`
 
 ## Install
 
@@ -64,6 +79,7 @@ Prompt assembly includes:
 - curated memory (`memory/MEMORY.md`)
 - indexed retrieval snippets from memory markdown files
 - recent daily memory snippets
+- cortex bulletin context (when available)
 - discovered skill summaries
 
 ## Non-Interactive Onboarding
