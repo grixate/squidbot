@@ -73,6 +73,10 @@ Memory is not a black box.
 Squidbot is designed for delegation.
 
 - Explicit subagent lifecycle management
+- New **Channel-Branch-Worker** runtime split:
+  - `Channel`: user-facing session actor loop
+  - `Branch`: lightweight reasoning fork (memory-first, limited tools)
+  - `Worker`: execution path (existing subagent + federation flow)
 - Isolated memory and budgets per agent
 - Federation HTTP server/client for trusted peer execution
 - Idempotency keys and peer health tracking
@@ -111,11 +115,11 @@ Squidbot supports autonomous workflows.
 
 Avoid provider lock-in.
 
-- Dynamic provider model routing
+- Process-aware model routing (channel/branch/worker/compactor/cortex)
 - OpenClaw catalog parity support
 - Out-of-box providers: OpenRouter, Anthropic, OpenAI, Gemini, Ollama, LM Studio, Moonshot AI, MiniMax
 - Multiple provider and channel profiles
-- Graceful fallback behavior
+- Per-process fallback model chains with cooldown for rate-limit pressure
 
 **Outcome:** portability without sacrificing capability.
 
@@ -167,12 +171,98 @@ Run without touching `~/.squidbot`:
 
 ## Architecture at a Glance
 
-1. Incoming message maps to a session actor
-2. Actor loads bounded history from BoltDB
-3. Prompt assembles memory, skills, and context
-4. Tool/model loop runs under configured budgets
-5. Events and usage are persisted
-6. Memory files are updated and re-indexed
+1. User message enters a session `Channel` actor turn
+2. Channel decides direct reply vs `Branch` reasoning vs `Worker` execution
+3. Prompt assembles history + memory + skills + cortex bulletin
+4. Tool/model loop runs with process-aware routing + fallbacks
+5. Worker results flow via existing subagent/federation lifecycle
+6. Background compactor trims old turns and injects summary markers
+7. Cortex periodically refreshes bulletin from memory slices
+8. Runs/events/usage are persisted for management observability
+
+---
+
+## Runtime Topology
+
+### Channel
+
+- Per-session actor loop and user-facing orchestration
+- Full tool registry, task automation, and outbound messaging
+
+### Branch
+
+- Ephemeral reasoning process with constrained toolset:
+  - `memory_recall`
+  - `memory_save`
+  - `memory_delete`
+  - `channel_recall`
+- Spawned via channel tools:
+  - `branch_spawn`
+  - `branch_status`
+  - `branch_wait`
+
+### Worker
+
+- Existing subagent pipeline (`spawn`, `subagent_wait`, `subagent_status`, etc.)
+- Supports local / remote / auto routing through federation
+- Keeps artifact and execution-oriented behavior unchanged
+
+---
+
+## Long-Run Conversation Hygiene
+
+### Background Compactor
+
+- Monitors context pressure after turns
+- Threshold actions:
+  - background compaction
+  - aggressive compaction
+  - emergency truncate (no LLM dependency)
+- Removes oldest turns, stores a compact summary marker
+- Guarantees one active compaction run per session
+
+### Cortex Bulletin
+
+- Periodic memory synthesis into a short operational bulletin
+- Injected into channel prompt each turn
+- Retains previous bulletin when generation fails
+
+---
+
+## New Runtime Config Blocks
+
+Under `runtime`:
+
+- `routing`:
+  - `channelModel`, `branchModel`, `workerModel`, `compactorModel`, `cortexModel`
+  - `taskOverrides`, `fallbacks`, `rateLimitCooldownSec`
+- `compaction`:
+  - `enabled`, `backgroundThresholdPct`, `aggressiveThresholdPct`, `emergencyThresholdPct`
+- `cortex`:
+  - `enabled`, `bulletinIntervalSec`, `bulletinMaxWords`
+
+Defaults are conservative and can be tuned incrementally.
+
+---
+
+## Management Surfaces (Board / API)
+
+Runtime observability endpoints:
+
+- `GET /api/manage/runtime/branches`
+- `GET /api/manage/runtime/compaction/runs`
+- `GET /api/manage/runtime/cortex/events`
+
+Memory bulletin endpoints:
+
+- `GET /api/manage/memory/bulletin`
+- `POST /api/manage/memory/bulletin/regenerate`
+
+Settings endpoints:
+
+- `GET/PUT /api/manage/settings/routing`
+- `GET/PUT /api/manage/settings/compaction`
+- `GET/PUT /api/manage/settings/cortex`
 
 ---
 
@@ -260,25 +350,15 @@ squidbot budget status
 
 ---
 
-## Roadmap
+## Runtime Status
 
-Squidbot is built around a reliability-first core. Upcoming work focuses on making power features easier to operate at scale.
+The following runtime evolution work is now integrated:
 
-### ✅ Near-term
-
-- **Configuration UI**
-  - A friendly interface for workspace setup, providers/channels, budgets, memory, and skills
-  - Validate configs before they go live (less "why is nothing working" time)
-
-- **Mission Control**
-  - Central dashboard for **tasks, resources, and analytics**
-  - Track job runs, budgets, tool usage, latency, failures, and success rates
-  - Clear "what happened, when, and why" views across sessions and automations
-
-- **Federated Multi-Agent Management**
-  - Visual control plane for subagents and federated nodes
-  - Agent lifecycle, budgets, and permissions management
-  - Peer health status, delegation history, and idempotent execution tracking
+- Channel-Branch-Worker process split
+- Background context compaction service
+- Process-aware model routing + fallbacks
+- Cortex bulletin generation and prompt injection
+- Management APIs/UI for runtime observability and settings
 
 ---
 
