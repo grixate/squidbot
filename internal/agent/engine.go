@@ -25,6 +25,7 @@ import (
 	"github.com/grixate/squidbot/internal/contextctrl"
 	"github.com/grixate/squidbot/internal/cortex"
 	"github.com/grixate/squidbot/internal/federation"
+	"github.com/grixate/squidbot/internal/mcp"
 	"github.com/grixate/squidbot/internal/memory"
 	"github.com/grixate/squidbot/internal/mission"
 	"github.com/grixate/squidbot/internal/plugins"
@@ -60,6 +61,7 @@ type Engine struct {
 	outbound            chan OutboundMessage
 	policy              *tools.PathPolicy
 	memory              *memory.Manager
+	mcpManager          *mcp.Manager
 	plugins             plugins.Runtime
 	skills              skills.Runtime
 	subagents           *subagent.Manager
@@ -116,6 +118,9 @@ func NewEngine(cfg config.Config, providerClient provider.LLMProvider, model str
 		tokenSafetyCacheTTL: 2 * time.Second,
 		modelCooldown:       map[string]time.Time{},
 		entropy:             ulid.Monotonic(mrand.New(mrand.NewSource(time.Now().UnixNano())), 0),
+	}
+	if cfg.Features.MCP && cfg.Tools.MCP.Enabled {
+		engine.mcpManager = mcp.NewManager(cfg.Tools.MCP, config.WorkspacePath(cfg), logger)
 	}
 	pluginRuntime := plugins.NewManager(cfg, logger)
 	if err := pluginRuntime.Discover(context.Background()); err != nil {
@@ -221,6 +226,9 @@ func (e *Engine) Close() error {
 		}
 		if e.cortex != nil {
 			e.cortex.Stop()
+		}
+		if e.mcpManager != nil {
+			_ = e.mcpManager.Close()
 		}
 		if e.plugins != nil {
 			_ = e.plugins.Close()
@@ -596,7 +604,7 @@ func (h *sessionHandler) process(ctx context.Context, msg InboundMessage) (strin
 	}
 	messages := built.Messages
 	contextStage := built.Stage
-	registry, err := h.engine.buildRegistry(msg)
+	registry, err := h.engine.buildRegistry(turnCtx, msg)
 	if err != nil {
 		return "", err
 	}
@@ -812,7 +820,7 @@ func suggestsFollowUp(content string) bool {
 	return false
 }
 
-func (e *Engine) buildRegistry(msg InboundMessage) (*tools.Registry, error) {
+func (e *Engine) buildRegistry(ctx context.Context, msg InboundMessage) (*tools.Registry, error) {
 	cfg := e.currentConfig()
 	registry := tools.NewRegistry()
 	registry.Register(tools.NewReadFileTool(e.policy))
@@ -925,6 +933,13 @@ func (e *Engine) buildRegistry(msg InboundMessage) (*tools.Registry, error) {
 					return tools.ToolResult{Text: result.Text, Metadata: result.Metadata}, nil
 				},
 			})
+		}
+	}
+	if e.mcpManager != nil {
+		if err := e.mcpManager.EnsureConnected(ctx); err != nil {
+			e.log.Printf("mcp ensure connected failed: %v", err)
+		} else {
+			e.mcpManager.RegisterTools(registry)
 		}
 	}
 
@@ -1561,6 +1576,13 @@ func (e *Engine) runSubtask(ctx context.Context, run subagent.Run) (subagent.Res
 	}))
 	registry.Register(tools.NewWebSearchTool(cfg.Tools.Web.Search.APIKey, cfg.Tools.Web.Search.MaxResults))
 	registry.Register(tools.NewWebFetchTool(30000))
+	if e.mcpManager != nil {
+		if err := e.mcpManager.EnsureConnected(ctx); err != nil {
+			e.log.Printf("mcp ensure connected failed (subagent): %v", err)
+		} else {
+			e.mcpManager.RegisterTools(registry)
+		}
+	}
 
 	maxHops := cfg.Agents.Defaults.MaxToolIterations
 	if maxHops <= 0 {

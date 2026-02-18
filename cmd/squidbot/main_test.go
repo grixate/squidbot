@@ -3,12 +3,16 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"log"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -260,6 +264,94 @@ func TestRootCommandDoesNotPrintBannerForSubcommand(t *testing.T) {
 	}
 	if strings.Contains(out.String(), ".oooo.o") {
 		t.Fatalf("did not expect banner output for subcommand, got: %q", out.String())
+	}
+}
+
+func TestProviderLoginStatusLogoutOpenAICodex(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	configPath := writeTestConfig(t, baseTestConfig(t))
+
+	var tokenRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		switch r.URL.Path {
+		case "/device":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"device_code":               "dev-1",
+				"user_code":                 "CODE-1",
+				"verification_uri":          "https://example.com/verify",
+				"verification_uri_complete": "https://example.com/verify?code=CODE-1",
+				"expires_in":                30,
+				"interval":                  1,
+			})
+		case "/token":
+			tokenRequests.Add(1)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"access_token":  "access-1",
+				"refresh_token": "refresh-1",
+				"expires_in":    3600,
+				"account_id":    "acct-1",
+				"audience":      "chatgpt_api",
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("SQUIDBOT_OAUTH_OPENAI_CODEX_DEVICE_AUTH_URL", server.URL+"/device")
+	t.Setenv("SQUIDBOT_OAUTH_OPENAI_CODEX_TOKEN_URL", server.URL+"/token")
+	t.Setenv("SQUIDBOT_OAUTH_OPENAI_CODEX_CLIENT_ID", "test-client")
+
+	cmd := providerCmd(configPath)
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	var loginOut bytes.Buffer
+	cmd.SetOut(&loginOut)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{"login", "openai-codex"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("provider login should succeed: %v", err)
+	}
+	if tokenRequests.Load() == 0 {
+		t.Fatal("expected token endpoint request")
+	}
+
+	statusCmd := providerCmd(configPath)
+	statusCmd.SilenceUsage = true
+	statusCmd.SilenceErrors = true
+	var statusOut bytes.Buffer
+	statusCmd.SetOut(&statusOut)
+	statusCmd.SetErr(io.Discard)
+	statusCmd.SetArgs([]string{"status", "openai-codex"})
+	if err := statusCmd.Execute(); err != nil {
+		t.Fatalf("provider status should succeed: %v", err)
+	}
+	if !strings.Contains(statusOut.String(), "Authenticated: true") {
+		t.Fatalf("unexpected provider status output: %s", statusOut.String())
+	}
+
+	logoutCmd := providerCmd(configPath)
+	logoutCmd.SilenceUsage = true
+	logoutCmd.SilenceErrors = true
+	logoutCmd.SetOut(io.Discard)
+	logoutCmd.SetErr(io.Discard)
+	logoutCmd.SetArgs([]string{"logout", "openai-codex"})
+	if err := logoutCmd.Execute(); err != nil {
+		t.Fatalf("provider logout should succeed: %v", err)
+	}
+
+	statusAfter := providerCmd(configPath)
+	statusAfter.SilenceUsage = true
+	statusAfter.SilenceErrors = true
+	var statusAfterOut bytes.Buffer
+	statusAfter.SetOut(&statusAfterOut)
+	statusAfter.SetErr(io.Discard)
+	statusAfter.SetArgs([]string{"status", "openai-codex"})
+	if err := statusAfter.Execute(); err != nil {
+		t.Fatalf("provider status post-logout should succeed: %v", err)
+	}
+	if !strings.Contains(statusAfterOut.String(), "Authenticated: false") {
+		t.Fatalf("unexpected provider status after logout: %s", statusAfterOut.String())
 	}
 }
 

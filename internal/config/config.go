@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/grixate/squidbot/internal/catalog"
+	"github.com/grixate/squidbot/internal/oauth"
 )
 
 type Config struct {
@@ -54,9 +55,11 @@ type ProvidersConfig struct {
 }
 
 type ProviderConfig struct {
-	APIKey  string `json:"apiKey"`
-	APIBase string `json:"apiBase,omitempty"`
-	Model   string `json:"model,omitempty"`
+	APIKey         string `json:"apiKey"`
+	APIBase        string `json:"apiBase,omitempty"`
+	Model          string `json:"model,omitempty"`
+	OAuthAccountID string `json:"oauthAccountId,omitempty"`
+	OAuthAudience  string `json:"oauthAudience,omitempty"`
 }
 
 type ChannelsConfig struct {
@@ -96,6 +99,7 @@ type ToolsConfig struct {
 	Web        WebToolsConfig        `json:"web"`
 	Exec       ExecToolsConfig       `json:"exec"`
 	Filesystem FilesystemToolsConfig `json:"fs"`
+	MCP        MCPToolsConfig        `json:"mcp"`
 }
 
 type ExecToolsConfig struct {
@@ -109,12 +113,30 @@ type FilesystemToolsConfig struct {
 	SubagentWriteEnabled bool `json:"subagentWriteEnabled"`
 }
 
+type MCPToolsConfig struct {
+	Enabled           bool                       `json:"enabled"`
+	ConnectTimeoutSec int                        `json:"connectTimeoutSec"`
+	Servers           map[string]MCPServerConfig `json:"servers,omitempty"`
+}
+
+type MCPServerConfig struct {
+	Enabled    bool              `json:"enabled"`
+	Command    string            `json:"command,omitempty"`
+	Args       []string          `json:"args,omitempty"`
+	Env        map[string]string `json:"env,omitempty"`
+	URL        string            `json:"url,omitempty"`
+	Headers    map[string]string `json:"headers,omitempty"`
+	ToolPrefix string            `json:"toolPrefix,omitempty"`
+}
+
 type FeaturesConfig struct {
 	Streaming      bool `json:"streaming"`
 	ChannelsWave1  bool `json:"channelsWave1"`
 	SemanticMemory bool `json:"semanticMemory"`
 	Plugins        bool `json:"plugins"`
 	MetricsHTTP    bool `json:"metricsHttp"`
+	CodexOAuth     bool `json:"codexOAuth"`
+	MCP            bool `json:"mcp"`
 }
 
 type WebToolsConfig struct {
@@ -323,18 +345,25 @@ type DurationValue struct {
 }
 
 const (
-	ProviderOpenRouter = "openrouter"
-	ProviderAnthropic  = "anthropic"
-	ProviderOpenAI     = "openai"
-	ProviderGemini     = "gemini"
-	ProviderOllama     = "ollama"
-	ProviderLMStudio   = "lmstudio"
+	ProviderOpenRouter  = "openrouter"
+	ProviderAnthropic   = "anthropic"
+	ProviderOpenAI      = "openai"
+	ProviderOpenAICodex = "openai-codex"
+	ProviderGemini      = "gemini"
+	ProviderOllama      = "ollama"
+	ProviderLMStudio    = "lmstudio"
+)
+
+const (
+	ProviderOpenAICodexDefaultModel   = "openai-codex/gpt-5.1-codex"
+	ProviderOpenAICodexDefaultAPIBase = "https://chatgpt.com/backend-api/codex"
 )
 
 var supportedProviders = []string{
 	ProviderOpenRouter,
 	ProviderAnthropic,
 	ProviderOpenAI,
+	ProviderOpenAICodex,
 	ProviderGemini,
 	ProviderOllama,
 	ProviderLMStudio,
@@ -433,6 +462,11 @@ func Default() Config {
 				ParentWriteEnabled:   false,
 				SubagentWriteEnabled: false,
 			},
+			MCP: MCPToolsConfig{
+				Enabled:           false,
+				ConnectTimeoutSec: 20,
+				Servers:           map[string]MCPServerConfig{},
+			},
 		},
 		Features: FeaturesConfig{
 			Streaming:      false,
@@ -440,6 +474,8 @@ func Default() Config {
 			SemanticMemory: false,
 			Plugins:        false,
 			MetricsHTTP:    false,
+			CodexOAuth:     false,
+			MCP:            false,
 		},
 		Gateway: GatewayConfig{
 			Host: "0.0.0.0",
@@ -711,6 +747,23 @@ func applyEnvOverrides(cfg *Config) {
 			*target = value
 		}
 	}
+	if cfg.Providers.Registry == nil {
+		cfg.Providers.Registry = map[string]ProviderConfig{}
+	}
+	codex := cfg.Providers.Registry[ProviderOpenAICodex]
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_OPENAI_CODEX_API_BASE")); value != "" {
+		codex.APIBase = value
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_OPENAI_CODEX_MODEL")); value != "" {
+		codex.Model = value
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_OPENAI_CODEX_OAUTH_ACCOUNT_ID")); value != "" {
+		codex.OAuthAccountID = value
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_OPENAI_CODEX_OAUTH_AUDIENCE")); value != "" {
+		codex.OAuthAudience = value
+	}
+	cfg.Providers.Registry[ProviderOpenAICodex] = codex
 
 	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_TELEGRAM_ENABLED")); value != "" {
 		parsed, err := strconv.ParseBool(value)
@@ -743,6 +796,16 @@ func applyEnvOverrides(cfg *Config) {
 			cfg.Features.MetricsHTTP = parsed
 		}
 	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_FEATURE_CODEX_OAUTH")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			cfg.Features.CodexOAuth = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_FEATURE_MCP")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			cfg.Features.MCP = parsed
+		}
+	}
 	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_TOOLS_EXEC_ENABLED")); value != "" {
 		if parsed, err := strconv.ParseBool(value); err == nil {
 			cfg.Tools.Exec.Enabled = parsed
@@ -762,6 +825,16 @@ func applyEnvOverrides(cfg *Config) {
 	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_TOOLS_FS_SUBAGENT_WRITE_ENABLED")); value != "" {
 		if parsed, err := strconv.ParseBool(value); err == nil {
 			cfg.Tools.Filesystem.SubagentWriteEnabled = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_TOOLS_MCP_ENABLED")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			cfg.Tools.MCP.Enabled = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_TOOLS_MCP_CONNECT_TIMEOUT_SEC")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.Tools.MCP.ConnectTimeoutSec = parsed
 		}
 	}
 	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_RUNTIME_PLUGINS_ENABLED")); value != "" {
@@ -1193,6 +1266,7 @@ func applyEnvOverrides(cfg *Config) {
 	normalizeDefaultChannels(cfg)
 	normalizeSkillsConfig(cfg)
 	normalizeCronRuntimeConfig(cfg)
+	normalizeMCPConfig(cfg)
 	normalizeAdvancedRuntimeConfig(cfg)
 	normalizeContextControlConfig(cfg)
 }
@@ -1261,6 +1335,58 @@ func normalizeCronRuntimeConfig(cfg *Config) {
 	if cfg.Runtime.Cron.MaxQueue <= 0 {
 		cfg.Runtime.Cron.MaxQueue = 128
 	}
+}
+
+func normalizeMCPConfig(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	if cfg.Tools.MCP.ConnectTimeoutSec <= 0 {
+		cfg.Tools.MCP.ConnectTimeoutSec = 20
+	}
+	if cfg.Tools.MCP.Servers == nil {
+		cfg.Tools.MCP.Servers = map[string]MCPServerConfig{}
+	}
+	normalized := make(map[string]MCPServerConfig, len(cfg.Tools.MCP.Servers))
+	for rawName, rawCfg := range cfg.Tools.MCP.Servers {
+		name := strings.TrimSpace(rawName)
+		if name == "" {
+			continue
+		}
+		next := MCPServerConfig{
+			Enabled:    rawCfg.Enabled,
+			Command:    strings.TrimSpace(rawCfg.Command),
+			Args:       append([]string(nil), rawCfg.Args...),
+			Env:        map[string]string{},
+			URL:        strings.TrimSpace(rawCfg.URL),
+			Headers:    map[string]string{},
+			ToolPrefix: strings.TrimSpace(rawCfg.ToolPrefix),
+		}
+		if len(rawCfg.Env) > 0 {
+			next.Env = make(map[string]string, len(rawCfg.Env))
+			for key, value := range rawCfg.Env {
+				k := strings.TrimSpace(key)
+				v := strings.TrimSpace(value)
+				if k == "" || v == "" {
+					continue
+				}
+				next.Env[k] = v
+			}
+		}
+		if len(rawCfg.Headers) > 0 {
+			next.Headers = make(map[string]string, len(rawCfg.Headers))
+			for key, value := range rawCfg.Headers {
+				k := strings.TrimSpace(key)
+				v := strings.TrimSpace(value)
+				if k == "" || v == "" {
+					continue
+				}
+				next.Headers[k] = v
+			}
+		}
+		normalized[name] = next
+	}
+	cfg.Tools.MCP.Servers = normalized
 }
 
 func normalizeAdvancedRuntimeConfig(cfg *Config) {
@@ -1464,6 +1590,8 @@ func (c Config) ProviderByName(name string) (ProviderConfig, bool) {
 		return c.Providers.Anthropic, true
 	case ProviderOpenAI:
 		return c.Providers.OpenAI, true
+	case ProviderOpenAICodex:
+		return c.Providers.Registry[ProviderOpenAICodex], true
 	case ProviderGemini:
 		return c.Providers.Gemini, true
 	case ProviderOllama:
@@ -1508,6 +1636,9 @@ func ProviderDefaultAPIBase(name string) string {
 	if !ok {
 		return ""
 	}
+	if normalized == ProviderOpenAICodex {
+		return ProviderOpenAICodexDefaultAPIBase
+	}
 	if profile, exists := catalog.ProviderByID(normalized); exists {
 		return strings.TrimSpace(profile.DefaultAPIBase)
 	}
@@ -1518,6 +1649,9 @@ func ProviderDefaultModel(name string) string {
 	normalized, ok := NormalizeProviderName(name)
 	if !ok {
 		return ""
+	}
+	if normalized == ProviderOpenAICodex {
+		return ProviderOpenAICodexDefaultModel
 	}
 	if profile, exists := catalog.ProviderByID(normalized); exists {
 		return strings.TrimSpace(profile.DefaultModel)
@@ -1560,6 +1694,9 @@ func ProviderRequirements(name string) (requiresAPIKey, requiresModel bool, ok b
 	if !ok {
 		return false, false, false
 	}
+	if normalized == ProviderOpenAICodex {
+		return false, false, true
+	}
 	if profile, exists := catalog.ProviderByID(normalized); exists {
 		return profile.RequiresAPIKey, profile.RequiresModel, true
 	}
@@ -1570,6 +1707,12 @@ func ProviderRequirements(name string) (requiresAPIKey, requiresModel bool, ok b
 }
 
 func validateProviderConfig(name string, provider ProviderConfig) error {
+	if name == ProviderOpenAICodex {
+		if !oauth.NewOpenAICodexTokenStore().HasUsableToken(time.Now().UTC(), 2*time.Minute) {
+			return fmt.Errorf("provider %q requires oauth login. Run `squidbot provider login openai-codex`", name)
+		}
+		return nil
+	}
 	requiresAPIKey, requiresModel, ok := ProviderRequirements(name)
 	if !ok {
 		return fmt.Errorf("unsupported provider %q", name)
@@ -1584,6 +1727,9 @@ func validateProviderConfig(name string, provider ProviderConfig) error {
 }
 
 func hasProviderCredentials(providerID string, provider ProviderConfig) bool {
+	if providerID == ProviderOpenAICodex {
+		return oauth.NewOpenAICodexTokenStore().HasUsableToken(time.Now().UTC(), 2*time.Minute)
+	}
 	requiresAPIKey, requiresModel, ok := ProviderRequirements(providerID)
 	if !ok {
 		return false
@@ -1732,6 +1878,12 @@ func applyDynamicProviderEnvOverrides(cfg *Config) {
 		case strings.HasSuffix(rest, "_MODEL"):
 			field = "model"
 			rest = strings.TrimSuffix(rest, "_MODEL")
+		case strings.HasSuffix(rest, "_OAUTH_ACCOUNT_ID"):
+			field = "oauth_account_id"
+			rest = strings.TrimSuffix(rest, "_OAUTH_ACCOUNT_ID")
+		case strings.HasSuffix(rest, "_OAUTH_AUDIENCE"):
+			field = "oauth_audience"
+			rest = strings.TrimSuffix(rest, "_OAUTH_AUDIENCE")
 		default:
 			continue
 		}
@@ -1750,6 +1902,10 @@ func applyDynamicProviderEnvOverrides(cfg *Config) {
 			current.APIBase = value
 		case "model":
 			current.Model = value
+		case "oauth_account_id":
+			current.OAuthAccountID = value
+		case "oauth_audience":
+			current.OAuthAudience = value
 		}
 		cfg.Providers.Registry[providerID] = current
 	}
@@ -1811,5 +1967,9 @@ func applyDynamicChannelEnvOverrides(cfg *Config) {
 }
 
 func isEmptyProvider(provider ProviderConfig) bool {
-	return strings.TrimSpace(provider.APIKey) == "" && strings.TrimSpace(provider.APIBase) == "" && strings.TrimSpace(provider.Model) == ""
+	return strings.TrimSpace(provider.APIKey) == "" &&
+		strings.TrimSpace(provider.APIBase) == "" &&
+		strings.TrimSpace(provider.Model) == "" &&
+		strings.TrimSpace(provider.OAuthAccountID) == "" &&
+		strings.TrimSpace(provider.OAuthAudience) == ""
 }

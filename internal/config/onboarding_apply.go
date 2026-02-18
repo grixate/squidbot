@@ -54,8 +54,10 @@ func ApplyOnboardingInput(cfg Config, input OnboardingInput) (Config, error) {
 	}
 	migrateLegacyChannels(&cfg)
 
-	if err := ValidateActiveProvider(cfg); err != nil {
-		return cfg, err
+	if providerName != ProviderOpenAICodex {
+		if err := ValidateActiveProvider(cfg); err != nil {
+			return cfg, err
+		}
 	}
 	if err := validateTelegramOnboarding(cfg); err != nil {
 		return cfg, err

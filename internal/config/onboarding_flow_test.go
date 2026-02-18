@@ -147,6 +147,23 @@ func TestRunOnboardingNonInteractiveMiniMaxSuccess(t *testing.T) {
 	}
 }
 
+func TestRunOnboardingNonInteractiveOpenAICodexWarnsWhenUnauthed(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	result, err := RunOnboarding(context.Background(), Default(), OnboardingOptions{
+		Provider:       ProviderOpenAICodex,
+		NonInteractive: true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Config.Providers.Active != ProviderOpenAICodex {
+		t.Fatalf("unexpected provider: %s", result.Config.Providers.Active)
+	}
+	if len(result.Warnings) == 0 || !strings.Contains(result.Warnings[0], "provider login openai-codex") {
+		t.Fatalf("expected codex login warning, got %#v", result.Warnings)
+	}
+}
+
 func TestRunOnboardingGeminiVerificationWarningInteractive(t *testing.T) {
 	input := strings.NewReader("4\nsk-gemini\n\n1\nn\ny\n")
 	result, err := RunOnboarding(context.Background(), Default(), OnboardingOptions{

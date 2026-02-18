@@ -63,6 +63,12 @@ Use this checklist when preparing a stable GitHub release from `main`.
   - `git rev-parse HEAD`
 - [ ] Re-run quick sanity suite on `main`:
   - `go test ./...`
+- [ ] MCP/Codex migration docs are current:
+  - `docs/MCP_CODEX_MIGRATION.md`
+  - `docs/MCP_CODEX_DEFAULT_ON_PROPOSAL.md`
+- [ ] If defaults are changing, confirm phase-4 readiness gates are met:
+  - `squidbot status`
+  - `squidbot doctor`
 
 ## 6) Rollback Procedure
 

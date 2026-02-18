@@ -9,8 +9,10 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/grixate/squidbot/internal/catalog"
+	"github.com/grixate/squidbot/internal/oauth"
 )
 
 type OnboardingOptions struct {
@@ -98,6 +100,9 @@ func RunOnboarding(ctx context.Context, cfg Config, opts OnboardingOptions) (Onb
 			result.GeminiCLIVerified = true
 		}
 	}
+	if providerName == ProviderOpenAICodex && !oauth.NewOpenAICodexTokenStore().HasUsableToken(time.Now().UTC(), 2*time.Minute) {
+		result.Warnings = append(result.Warnings, "OpenAI Codex selected but OAuth login is not available yet. Run `squidbot provider login openai-codex`.")
+	}
 
 	return result, nil
 }
@@ -149,6 +154,21 @@ func fillOnboardingProviderConfig(providerName string, providerCfg *ProviderConf
 		}
 		if requiredModel && strings.TrimSpace(providerCfg.Model) == "" {
 			return fmt.Errorf("provider %q requires model in non-interactive mode (--model)", providerName)
+		}
+		return nil
+	}
+
+	if providerName == ProviderOpenAICodex {
+		if strings.TrimSpace(providerCfg.Model) == "" {
+			providerCfg.Model = ProviderDefaultModel(providerName)
+		}
+		value, err := promptLine(reader, out, "Model for OpenAI Codex (optional)", providerCfg.Model)
+		if err != nil {
+			return err
+		}
+		providerCfg.Model = strings.TrimSpace(value)
+		if strings.TrimSpace(providerCfg.Model) == "" {
+			providerCfg.Model = ProviderDefaultModel(providerName)
 		}
 		return nil
 	}
@@ -389,6 +409,7 @@ func promptProviderSelection(reader *bufio.Reader, out io.Writer) (string, error
 		ProviderGemini,
 		ProviderOllama,
 		ProviderLMStudio,
+		ProviderOpenAICodex,
 	}
 	seen := map[string]struct{}{}
 	providers := make([]string, 0, len(SupportedProviders()))
@@ -522,6 +543,8 @@ func providerLabel(providerName string) string {
 		return "Anthropic"
 	case ProviderOpenAI:
 		return "OpenAI"
+	case ProviderOpenAICodex:
+		return "OpenAI Codex"
 	case ProviderGemini:
 		return "Gemini"
 	case ProviderOllama:

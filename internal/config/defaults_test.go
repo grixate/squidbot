@@ -21,6 +21,21 @@ func TestDefaultIncludesMemoryAndSkillsSettings(t *testing.T) {
 	if cfg.Memory.EmbeddingsProvider != "none" {
 		t.Fatalf("unexpected memory.embeddingsProvider default: %q", cfg.Memory.EmbeddingsProvider)
 	}
+	if cfg.Features.CodexOAuth {
+		t.Fatal("expected features.codexOAuth default false")
+	}
+	if cfg.Features.MCP {
+		t.Fatal("expected features.mcp default false")
+	}
+	if cfg.Tools.MCP.Enabled {
+		t.Fatal("expected tools.mcp.enabled default false")
+	}
+	if cfg.Tools.MCP.ConnectTimeoutSec != 20 {
+		t.Fatalf("unexpected tools.mcp.connectTimeoutSec: %d", cfg.Tools.MCP.ConnectTimeoutSec)
+	}
+	if cfg.Tools.MCP.Servers == nil {
+		t.Fatal("expected tools.mcp.servers map")
+	}
 	if len(cfg.Skills.Paths) != 1 {
 		t.Fatalf("unexpected skills paths defaults: %#v", cfg.Skills.Paths)
 	}

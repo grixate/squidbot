@@ -117,7 +117,7 @@ Avoid provider lock-in.
 
 - Process-aware model routing (channel/branch/worker/compactor/cortex)
 - OpenClaw catalog parity support
-- Out-of-box providers: OpenRouter, Anthropic, OpenAI, Gemini, Ollama, LM Studio, Moonshot AI, MiniMax
+- Out-of-box providers: OpenRouter, Anthropic, OpenAI, OpenAI Codex (OAuth), Gemini, Ollama, LM Studio, Moonshot AI, MiniMax
 - Multiple provider and channel profiles
 - Per-process fallback model chains with cooldown for rate-limit pressure
 
@@ -131,6 +131,39 @@ Avoid provider lock-in.
 - Webhook / noop fallback for additional channels
 
 **Outcome:** high uptime even when integrations fail.
+
+### 🧰 MCP Tool Servers (Feature-Flagged)
+
+- Optional MCP ingestion from local stdio servers or remote HTTP endpoints
+- Discovered MCP tools are registered as runtime tools with `mcp_<server>_<tool>` names
+- Non-fatal startup behavior: failed MCP servers are skipped, healthy servers still load
+
+Enable with:
+
+```json
+{
+  "features": {
+    "mcp": true
+  },
+  "tools": {
+    "mcp": {
+      "enabled": true,
+      "connectTimeoutSec": 20,
+      "servers": {
+        "filesystem": {
+          "enabled": true,
+          "command": "npx",
+          "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/workspace"]
+        },
+        "remote": {
+          "enabled": true,
+          "url": "https://mcp.example.com/rpc"
+        }
+      }
+    }
+  }
+}
+```
 
 ---
 
@@ -333,6 +366,9 @@ squidbot status
 squidbot agent -m "..."
 squidbot gateway
 squidbot doctor
+squidbot provider login openai-codex
+squidbot provider status openai-codex
+squidbot provider logout openai-codex
 
 squidbot cron list --all
 squidbot cron add --name ... --message ... --every <seconds>
@@ -347,6 +383,23 @@ squidbot skills reload
 
 squidbot budget status
 ```
+
+## OpenAI Codex OAuth Quickstart
+
+```bash
+squidbot onboard --non-interactive --provider openai-codex --model openai-codex/gpt-5.1-codex
+squidbot provider login openai-codex
+squidbot agent -m "hello"
+```
+
+Notes:
+- `features.codexOAuth` must be `true` to activate the Codex provider path.
+- OAuth tokens are stored outside `config.json` under `~/.squidbot/oauth/openai-codex.json`.
+
+## Migration & Rollout Docs
+
+- Migration guide: `docs/MCP_CODEX_MIGRATION.md`
+- Default-on readiness proposal: `docs/MCP_CODEX_DEFAULT_ON_PROPOSAL.md`
 
 ---
 

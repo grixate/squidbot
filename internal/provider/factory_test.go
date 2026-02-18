@@ -1,9 +1,14 @@
 package provider
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/grixate/squidbot/internal/config"
+	"github.com/grixate/squidbot/internal/oauth"
 )
 
 func TestFromConfig(t *testing.T) {
@@ -148,5 +153,56 @@ func TestFromConfig(t *testing.T) {
 		if openaiCompat.baseURL != "https://api.minimax.io/v1" {
 			t.Fatalf("unexpected base URL: %s", openaiCompat.baseURL)
 		}
+	})
+
+	t.Run("openai codex requires feature flag", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		if err := oauth.NewOpenAICodexTokenStore().Save(oauth.Token{
+			AccessToken:  "tok",
+			RefreshToken: "ref",
+			ExpiresAt:    time.Now().UTC().Add(time.Hour),
+		}); err != nil {
+			t.Fatalf("save token: %v", err)
+		}
+		cfg := config.Default()
+		cfg.Providers.Active = config.ProviderOpenAICodex
+		_ = cfg.SetProviderByName(config.ProviderOpenAICodex, config.ProviderConfig{
+			Model: config.ProviderOpenAICodexDefaultModel,
+		})
+		_, _, err := FromConfig(cfg)
+		if err == nil || !strings.Contains(err.Error(), "features.codexOAuth") {
+			t.Fatalf("expected codex feature-flag error, got %v", err)
+		}
+	})
+
+	t.Run("openai codex constructs dedicated provider", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		store := oauth.NewOpenAICodexTokenStore()
+		if err := store.Save(oauth.Token{
+			AccessToken:  "tok-1",
+			RefreshToken: "ref-1",
+			ExpiresAt:    time.Now().UTC().Add(time.Hour),
+		}); err != nil {
+			t.Fatalf("save token: %v", err)
+		}
+		cfg := config.Default()
+		cfg.Features.CodexOAuth = true
+		cfg.Providers.Active = config.ProviderOpenAICodex
+		_ = cfg.SetProviderByName(config.ProviderOpenAICodex, config.ProviderConfig{
+			Model:   config.ProviderOpenAICodexDefaultModel,
+			APIBase: config.ProviderOpenAICodexDefaultAPIBase,
+		})
+		client, model, err := FromConfig(cfg)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if _, ok := client.(*OpenAICodexProvider); !ok {
+			t.Fatalf("expected OpenAICodexProvider, got %T", client)
+		}
+		if model != config.ProviderOpenAICodexDefaultModel {
+			t.Fatalf("unexpected model: %s", model)
+		}
+		_ = os.Remove(filepath.Join(home, ".squidbot", "oauth", "openai-codex.json"))
 	})
 }
