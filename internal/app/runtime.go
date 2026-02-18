@@ -261,7 +261,21 @@ func (r *Runtime) startMetricsHTTP() {
 	authToken := strings.TrimSpace(r.Config.Runtime.MetricsHTTP.AuthToken)
 	localhostOnly := r.Config.Runtime.MetricsHTTP.LocalhostOnly
 	mux := http.NewServeMux()
-	mux.HandleFunc("/metrics", func(w http.ResponseWriter, req *http.Request) {
+	mux.HandleFunc("/metrics", metricsHandler(r.Metrics, authToken, localhostOnly))
+	r.metricsSrv = &http.Server{Addr: listenAddr, Handler: mux}
+	go func() {
+		if err := r.metricsSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			r.log.Printf("metrics http stopped: %v", err)
+		}
+	}()
+}
+
+func metricsHandler(metrics *telemetry.Metrics, authToken string, localhostOnly bool) http.HandlerFunc {
+	if metrics == nil {
+		metrics = &telemetry.Metrics{}
+	}
+	authToken = strings.TrimSpace(authToken)
+	return func(w http.ResponseWriter, req *http.Request) {
 		if localhostOnly {
 			host, _, err := net.SplitHostPort(req.RemoteAddr)
 			if err == nil {
@@ -280,14 +294,8 @@ func (r *Runtime) startMetricsHTTP() {
 			}
 		}
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-		_, _ = w.Write([]byte(telemetry.PrometheusText(r.Metrics.Snapshot())))
-	})
-	r.metricsSrv = &http.Server{Addr: listenAddr, Handler: mux}
-	go func() {
-		if err := r.metricsSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			r.log.Printf("metrics http stopped: %v", err)
-		}
-	}()
+		_, _ = w.Write([]byte(telemetry.PrometheusText(metrics.Snapshot())))
+	}
 }
 
 func (r *Runtime) registerChannels(cfg config.Config) error {
