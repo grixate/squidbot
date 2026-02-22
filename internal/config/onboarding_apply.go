@@ -40,7 +40,8 @@ func ApplyOnboardingInput(cfg Config, input OnboardingInput) (Config, error) {
 			if normalizedID == "" {
 				continue
 			}
-			channel.Token = strings.TrimSpace(channel.Token)
+			channel.TokenRef = strings.TrimSpace(channel.TokenRef)
+			channel.AuthTokenRef = strings.TrimSpace(channel.AuthTokenRef)
 			channel.AllowFrom = normalizeAllowFrom(channel.AllowFrom)
 			cfg.Channels.Registry[normalizedID] = channel
 		}
@@ -49,7 +50,7 @@ func ApplyOnboardingInput(cfg Config, input OnboardingInput) (Config, error) {
 		Label:     "Telegram",
 		Kind:      "core",
 		Enabled:   input.Telegram.Enabled,
-		Token:     strings.TrimSpace(input.Telegram.Token),
+		TokenRef:  strings.TrimSpace(input.Telegram.TokenRef),
 		AllowFrom: normalizeAllowFrom(input.Telegram.AllowFrom),
 	}
 	migrateLegacyChannels(&cfg)

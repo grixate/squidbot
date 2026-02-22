@@ -55,7 +55,8 @@ type ProvidersConfig struct {
 }
 
 type ProviderConfig struct {
-	APIKey         string `json:"apiKey"`
+	APIKeyRef      string `json:"apiKeyRef,omitempty"`
+	APIKey         string `json:"-"`
 	APIBase        string `json:"apiBase,omitempty"`
 	Model          string `json:"model,omitempty"`
 	OAuthAccountID string `json:"oauthAccountId,omitempty"`
@@ -71,28 +72,32 @@ type ChannelsConfig struct {
 
 type TelegramConfig struct {
 	Enabled   bool     `json:"enabled"`
-	Token     string   `json:"token"`
+	TokenRef  string   `json:"tokenRef,omitempty"`
+	Token     string   `json:"-"`
 	AllowFrom []string `json:"allowFrom"`
 }
 
 type GenericChannelConfig struct {
-	Label     string            `json:"label,omitempty"`
-	Kind      string            `json:"kind,omitempty"`
-	Enabled   bool              `json:"enabled"`
-	Token     string            `json:"token,omitempty"`
-	AllowFrom []string          `json:"allowFrom,omitempty"`
-	Endpoint  string            `json:"endpoint,omitempty"`
-	AuthToken string            `json:"authToken,omitempty"`
-	Headers   map[string]string `json:"headers,omitempty"`
-	Metadata  map[string]string `json:"metadata,omitempty"`
+	Label        string            `json:"label,omitempty"`
+	Kind         string            `json:"kind,omitempty"`
+	Enabled      bool              `json:"enabled"`
+	TokenRef     string            `json:"tokenRef,omitempty"`
+	Token        string            `json:"-"`
+	AllowFrom    []string          `json:"allowFrom,omitempty"`
+	Endpoint     string            `json:"endpoint,omitempty"`
+	AuthTokenRef string            `json:"authTokenRef,omitempty"`
+	AuthToken    string            `json:"-"`
+	Headers      map[string]string `json:"headers,omitempty"`
+	Metadata     map[string]string `json:"metadata,omitempty"`
 }
 
 type PluginChannelConfig struct {
-	Enabled   bool              `json:"enabled"`
-	Endpoint  string            `json:"endpoint,omitempty"`
-	AuthToken string            `json:"authToken,omitempty"`
-	Headers   map[string]string `json:"headers,omitempty"`
-	Metadata  map[string]string `json:"metadata,omitempty"`
+	Enabled      bool              `json:"enabled"`
+	Endpoint     string            `json:"endpoint,omitempty"`
+	AuthTokenRef string            `json:"authTokenRef,omitempty"`
+	AuthToken    string            `json:"-"`
+	Headers      map[string]string `json:"headers,omitempty"`
+	Metadata     map[string]string `json:"metadata,omitempty"`
 }
 
 type ToolsConfig struct {
@@ -120,13 +125,14 @@ type MCPToolsConfig struct {
 }
 
 type MCPServerConfig struct {
-	Enabled    bool              `json:"enabled"`
-	Command    string            `json:"command,omitempty"`
-	Args       []string          `json:"args,omitempty"`
-	Env        map[string]string `json:"env,omitempty"`
-	URL        string            `json:"url,omitempty"`
-	Headers    map[string]string `json:"headers,omitempty"`
-	ToolPrefix string            `json:"toolPrefix,omitempty"`
+	Enabled      bool              `json:"enabled"`
+	Command      string            `json:"command,omitempty"`
+	Args         []string          `json:"args,omitempty"`
+	Env          map[string]string `json:"env,omitempty"`
+	EnvAllowlist []string          `json:"envAllowlist,omitempty"`
+	URL          string            `json:"url,omitempty"`
+	Headers      map[string]string `json:"headers,omitempty"`
+	ToolPrefix   string            `json:"toolPrefix,omitempty"`
 }
 
 type FeaturesConfig struct {
@@ -144,7 +150,8 @@ type WebToolsConfig struct {
 }
 
 type WebSearchConfig struct {
-	APIKey     string `json:"apiKey"`
+	APIKeyRef  string `json:"apiKeyRef,omitempty"`
+	APIKey     string `json:"-"`
 	MaxResults int    `json:"maxResults"`
 }
 
@@ -212,6 +219,7 @@ type CronRuntimeConfig struct {
 type PluginsRuntimeConfig struct {
 	Enabled           bool     `json:"enabled"`
 	Paths             []string `json:"paths"`
+	EnvAllowlist      []string `json:"envAllowlist,omitempty"`
 	DefaultTimeoutSec int      `json:"defaultTimeoutSec"`
 	MaxConcurrent     int      `json:"maxConcurrent"`
 	MaxProcesses      int      `json:"maxProcesses"`
@@ -220,7 +228,8 @@ type PluginsRuntimeConfig struct {
 type MetricsHTTPRuntimeConfig struct {
 	Enabled       bool   `json:"enabled"`
 	ListenAddr    string `json:"listenAddr"`
-	AuthToken     string `json:"authToken,omitempty"`
+	AuthTokenRef  string `json:"authTokenRef,omitempty"`
+	AuthToken     string `json:"-"`
 	LocalhostOnly bool   `json:"localhostOnly"`
 }
 
@@ -254,7 +263,8 @@ type TokenSafetyRuntimeConfig struct {
 type FederationPeerConfig struct {
 	ID             string   `json:"id"`
 	BaseURL        string   `json:"baseUrl"`
-	AuthToken      string   `json:"authToken,omitempty"`
+	AuthTokenRef   string   `json:"authTokenRef,omitempty"`
+	AuthToken      string   `json:"-"`
 	Enabled        bool     `json:"enabled"`
 	Capabilities   []string `json:"capabilities,omitempty"`
 	Roles          []string `json:"roles,omitempty"`
@@ -522,6 +532,7 @@ func Default() Config {
 			Plugins: PluginsRuntimeConfig{
 				Enabled:           false,
 				Paths:             []string{filepath.Join(workspace, "plugins")},
+				EnvAllowlist:      []string{"PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR"},
 				DefaultTimeoutSec: 60,
 				MaxConcurrent:     4,
 				MaxProcesses:      8,
@@ -654,6 +665,18 @@ func expandPath(path string) string {
 }
 
 func Load(path string) (Config, error) {
+	return LoadRuntimeConfig(path)
+}
+
+func LoadRuntimeConfig(path string) (Config, error) {
+	return load(path, true)
+}
+
+func LoadPersistedConfig(path string) (Config, error) {
+	return load(path, false)
+}
+
+func load(path string, applyRuntimeOverrides bool) (Config, error) {
 	cfg := Default()
 	if path == "" {
 		path = ConfigPath()
@@ -663,16 +686,28 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		if os.IsNotExist(err) {
 			normalizeDefaultChannels(&cfg)
-			applyEnvOverrides(&cfg)
+			if applyRuntimeOverrides {
+				applyEnvOverrides(&cfg)
+			}
 			normalizeSkillsConfig(&cfg)
 			normalizeAdvancedRuntimeConfig(&cfg)
 			normalizeContextControlConfig(&cfg)
+			if applyRuntimeOverrides {
+				if err := resolveSecretRefs(&cfg); err != nil {
+					return cfg, err
+				}
+			}
 			return cfg, nil
 		}
 		return cfg, err
 	}
 	var raw map[string]any
-	_ = json.Unmarshal(bytes, &raw)
+	if err := json.Unmarshal(bytes, &raw); err != nil {
+		return cfg, err
+	}
+	if err := validateNoPlaintextSecretsRaw(raw); err != nil {
+		return cfg, err
+	}
 	if err := json.Unmarshal(bytes, &cfg); err != nil {
 		return cfg, err
 	}
@@ -680,10 +715,17 @@ func Load(path string) (Config, error) {
 	migrateLegacyProviders(&cfg)
 	migrateLegacyChannels(&cfg)
 	normalizeDefaultChannels(&cfg)
-	applyEnvOverrides(&cfg)
+	if applyRuntimeOverrides {
+		applyEnvOverrides(&cfg)
+	}
 	normalizeSkillsConfig(&cfg)
 	normalizeAdvancedRuntimeConfig(&cfg)
 	normalizeContextControlConfig(&cfg)
+	if applyRuntimeOverrides {
+		if err := resolveSecretRefs(&cfg); err != nil {
+			return cfg, err
+		}
+	}
 	return cfg, nil
 }
 
@@ -692,14 +734,17 @@ func Save(path string, cfg Config) error {
 		path = ConfigPath()
 	}
 	path = expandPath(path)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	if err := os.Chmod(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+	return os.WriteFile(path, data, 0o600)
 }
 
 func applyEnvOverrides(cfg *Config) {
@@ -717,36 +762,36 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	env := map[string]*string{
 		"SQUIDBOT_PROVIDER_ACTIVE":            &cfg.Providers.Active,
-		"SQUIDBOT_OPENROUTER_API_KEY":         &cfg.Providers.OpenRouter.APIKey,
 		"SQUIDBOT_OPENROUTER_API_BASE":        &cfg.Providers.OpenRouter.APIBase,
 		"SQUIDBOT_OPENROUTER_MODEL":           &cfg.Providers.OpenRouter.Model,
-		"SQUIDBOT_ANTHROPIC_API_KEY":          &cfg.Providers.Anthropic.APIKey,
 		"SQUIDBOT_ANTHROPIC_MODEL":            &cfg.Providers.Anthropic.Model,
-		"SQUIDBOT_OPENAI_API_KEY":             &cfg.Providers.OpenAI.APIKey,
 		"SQUIDBOT_OPENAI_API_BASE":            &cfg.Providers.OpenAI.APIBase,
 		"SQUIDBOT_OPENAI_MODEL":               &cfg.Providers.OpenAI.Model,
-		"SQUIDBOT_GEMINI_API_KEY":             &cfg.Providers.Gemini.APIKey,
 		"SQUIDBOT_GEMINI_API_BASE":            &cfg.Providers.Gemini.APIBase,
 		"SQUIDBOT_GEMINI_MODEL":               &cfg.Providers.Gemini.Model,
-		"SQUIDBOT_OLLAMA_API_KEY":             &cfg.Providers.Ollama.APIKey,
 		"SQUIDBOT_OLLAMA_API_BASE":            &cfg.Providers.Ollama.APIBase,
 		"SQUIDBOT_OLLAMA_MODEL":               &cfg.Providers.Ollama.Model,
-		"SQUIDBOT_LMSTUDIO_API_KEY":           &cfg.Providers.LMStudio.APIKey,
 		"SQUIDBOT_LMSTUDIO_API_BASE":          &cfg.Providers.LMStudio.APIBase,
 		"SQUIDBOT_LMSTUDIO_MODEL":             &cfg.Providers.LMStudio.Model,
-		"SQUIDBOT_TELEGRAM_TOKEN":             &cfg.Channels.Telegram.Token,
-		"SQUIDBOT_BRAVE_API_KEY":              &cfg.Tools.Web.Search.APIKey,
 		"SQUIDBOT_MEMORY_INDEX_PATH":          &cfg.Memory.IndexPath,
 		"SQUIDBOT_MEMORY_EMBEDDINGS_PROVIDER": &cfg.Memory.EmbeddingsProvider,
 		"SQUIDBOT_MEMORY_EMBEDDINGS_MODEL":    &cfg.Memory.EmbeddingsModel,
 		"SQUIDBOT_METRICS_HTTP_LISTEN_ADDR":   &cfg.Runtime.MetricsHTTP.ListenAddr,
-		"SQUIDBOT_METRICS_HTTP_AUTH_TOKEN":    &cfg.Runtime.MetricsHTTP.AuthToken,
 	}
 	for key, target := range env {
 		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
 			*target = value
 		}
 	}
+	setEnvSecretRef(&cfg.Providers.OpenRouter.APIKeyRef, "SQUIDBOT_OPENROUTER_API_KEY")
+	setEnvSecretRef(&cfg.Providers.Anthropic.APIKeyRef, "SQUIDBOT_ANTHROPIC_API_KEY")
+	setEnvSecretRef(&cfg.Providers.OpenAI.APIKeyRef, "SQUIDBOT_OPENAI_API_KEY")
+	setEnvSecretRef(&cfg.Providers.Gemini.APIKeyRef, "SQUIDBOT_GEMINI_API_KEY")
+	setEnvSecretRef(&cfg.Providers.Ollama.APIKeyRef, "SQUIDBOT_OLLAMA_API_KEY")
+	setEnvSecretRef(&cfg.Providers.LMStudio.APIKeyRef, "SQUIDBOT_LMSTUDIO_API_KEY")
+	setEnvSecretRef(&cfg.Channels.Telegram.TokenRef, "SQUIDBOT_TELEGRAM_TOKEN")
+	setEnvSecretRef(&cfg.Tools.Web.Search.APIKeyRef, "SQUIDBOT_BRAVE_API_KEY")
+	setEnvSecretRef(&cfg.Runtime.MetricsHTTP.AuthTokenRef, "SQUIDBOT_METRICS_HTTP_AUTH_TOKEN")
 	if cfg.Providers.Registry == nil {
 		cfg.Providers.Registry = map[string]ProviderConfig{}
 	}
@@ -844,6 +889,9 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_RUNTIME_PLUGINS_PATHS")); value != "" {
 		cfg.Runtime.Plugins.Paths = splitCSV(value)
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_RUNTIME_PLUGINS_ENV_ALLOWLIST")); value != "" {
+		cfg.Runtime.Plugins.EnvAllowlist = splitCSV(value)
 	}
 	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_RUNTIME_PLUGINS_DEFAULT_TIMEOUT_SEC")); value != "" {
 		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
@@ -1354,13 +1402,31 @@ func normalizeMCPConfig(cfg *Config) {
 			continue
 		}
 		next := MCPServerConfig{
-			Enabled:    rawCfg.Enabled,
-			Command:    strings.TrimSpace(rawCfg.Command),
-			Args:       append([]string(nil), rawCfg.Args...),
-			Env:        map[string]string{},
-			URL:        strings.TrimSpace(rawCfg.URL),
-			Headers:    map[string]string{},
-			ToolPrefix: strings.TrimSpace(rawCfg.ToolPrefix),
+			Enabled:      rawCfg.Enabled,
+			Command:      strings.TrimSpace(rawCfg.Command),
+			Args:         append([]string(nil), rawCfg.Args...),
+			Env:          map[string]string{},
+			EnvAllowlist: []string{},
+			URL:          strings.TrimSpace(rawCfg.URL),
+			Headers:      map[string]string{},
+			ToolPrefix:   strings.TrimSpace(rawCfg.ToolPrefix),
+		}
+		if len(rawCfg.EnvAllowlist) > 0 {
+			seenEnv := map[string]struct{}{}
+			for _, item := range rawCfg.EnvAllowlist {
+				name := strings.TrimSpace(item)
+				if name == "" {
+					continue
+				}
+				if _, exists := seenEnv[name]; exists {
+					continue
+				}
+				seenEnv[name] = struct{}{}
+				next.EnvAllowlist = append(next.EnvAllowlist, name)
+			}
+		}
+		if len(next.EnvAllowlist) == 0 {
+			next.EnvAllowlist = []string{"PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR"}
 		}
 		if len(rawCfg.Env) > 0 {
 			next.Env = make(map[string]string, len(rawCfg.Env))
@@ -1434,6 +1500,9 @@ func normalizeAdvancedRuntimeConfig(cfg *Config) {
 	}
 	if cfg.Runtime.Cortex.BulletinMaxWords <= 0 {
 		cfg.Runtime.Cortex.BulletinMaxWords = 180
+	}
+	if len(cfg.Runtime.Plugins.EnvAllowlist) == 0 {
+		cfg.Runtime.Plugins.EnvAllowlist = []string{"PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR"}
 	}
 }
 
@@ -1525,16 +1594,16 @@ func (c Config) legacyPrimaryProvider() (name string, provider ProviderConfig) {
 			}
 		}
 	}
-	if strings.TrimSpace(c.Providers.OpenRouter.APIKey) != "" {
+	if providerHasAPIKey(c.Providers.OpenRouter) {
 		return ProviderOpenRouter, c.Providers.OpenRouter
 	}
-	if strings.TrimSpace(c.Providers.Anthropic.APIKey) != "" {
+	if providerHasAPIKey(c.Providers.Anthropic) {
 		return ProviderAnthropic, c.Providers.Anthropic
 	}
-	if strings.TrimSpace(c.Providers.OpenAI.APIKey) != "" {
+	if providerHasAPIKey(c.Providers.OpenAI) {
 		return ProviderOpenAI, c.Providers.OpenAI
 	}
-	if strings.TrimSpace(c.Providers.Gemini.APIKey) != "" {
+	if providerHasAPIKey(c.Providers.Gemini) {
 		return ProviderGemini, c.Providers.Gemini
 	}
 	return "", ProviderConfig{}
@@ -1717,7 +1786,7 @@ func validateProviderConfig(name string, provider ProviderConfig) error {
 	if !ok {
 		return fmt.Errorf("unsupported provider %q", name)
 	}
-	if requiresAPIKey && strings.TrimSpace(provider.APIKey) == "" {
+	if requiresAPIKey && !providerHasAPIKey(provider) {
 		return fmt.Errorf("provider %q requires apiKey", name)
 	}
 	if requiresModel && strings.TrimSpace(provider.Model) == "" {
@@ -1735,12 +1804,12 @@ func hasProviderCredentials(providerID string, provider ProviderConfig) bool {
 		return false
 	}
 	if requiresAPIKey {
-		return strings.TrimSpace(provider.APIKey) != ""
+		return providerHasAPIKey(provider)
 	}
 	if requiresModel {
 		return strings.TrimSpace(provider.Model) != ""
 	}
-	return strings.TrimSpace(provider.APIKey) != "" || strings.TrimSpace(provider.Model) != "" || strings.TrimSpace(provider.APIBase) != ""
+	return providerHasAPIKey(provider) || strings.TrimSpace(provider.Model) != "" || strings.TrimSpace(provider.APIBase) != ""
 }
 
 func migrateLegacyProviders(cfg *Config) {
@@ -1778,12 +1847,12 @@ func migrateLegacyChannels(cfg *Config) {
 		Label:     "Telegram",
 		Kind:      "core",
 		Enabled:   cfg.Channels.Telegram.Enabled,
-		Token:     strings.TrimSpace(cfg.Channels.Telegram.Token),
+		TokenRef:  strings.TrimSpace(cfg.Channels.Telegram.TokenRef),
 		AllowFrom: normalizeAllowFrom(cfg.Channels.Telegram.AllowFrom),
 	}
 	current := cfg.Channels.Registry["telegram"]
-	if strings.TrimSpace(current.Token) == "" && strings.TrimSpace(legacy.Token) != "" {
-		current.Token = legacy.Token
+	if strings.TrimSpace(current.TokenRef) == "" && strings.TrimSpace(legacy.TokenRef) != "" {
+		current.TokenRef = legacy.TokenRef
 	}
 	if len(current.AllowFrom) == 0 && len(legacy.AllowFrom) > 0 {
 		current.AllowFrom = legacy.AllowFrom
@@ -1796,7 +1865,7 @@ func migrateLegacyChannels(cfg *Config) {
 	telegram := cfg.Channels.Registry["telegram"]
 	cfg.Channels.Telegram = TelegramConfig{
 		Enabled:   telegram.Enabled,
-		Token:     strings.TrimSpace(telegram.Token),
+		TokenRef:  strings.TrimSpace(telegram.TokenRef),
 		AllowFrom: normalizeAllowFrom(telegram.AllowFrom),
 	}
 }
@@ -1854,6 +1923,80 @@ func nestedPathExists(root map[string]any, path ...string) bool {
 	return true
 }
 
+func validateNoPlaintextSecretsRaw(raw map[string]any) error {
+	if len(raw) == 0 {
+		return nil
+	}
+	violations := []string{}
+	record := func(path string, value any) {
+		if strings.TrimSpace(path) == "" {
+			return
+		}
+		switch typed := value.(type) {
+		case string:
+			if strings.TrimSpace(typed) != "" {
+				violations = append(violations, path)
+			}
+		}
+	}
+	obj := func(v any) map[string]any {
+		m, _ := v.(map[string]any)
+		return m
+	}
+
+	providers := obj(raw["providers"])
+	if providers != nil {
+		record("providers.openrouter.apiKey", obj(providers["openrouter"])["apiKey"])
+		record("providers.anthropic.apiKey", obj(providers["anthropic"])["apiKey"])
+		record("providers.openai.apiKey", obj(providers["openai"])["apiKey"])
+		record("providers.gemini.apiKey", obj(providers["gemini"])["apiKey"])
+		record("providers.ollama.apiKey", obj(providers["ollama"])["apiKey"])
+		record("providers.lmstudio.apiKey", obj(providers["lmstudio"])["apiKey"])
+		if registry, ok := providers["registry"].(map[string]any); ok {
+			for providerID, rawProvider := range registry {
+				record(fmt.Sprintf("providers.registry.%s.apiKey", providerID), obj(rawProvider)["apiKey"])
+			}
+		}
+	}
+
+	channels := obj(raw["channels"])
+	if channels != nil {
+		record("channels.telegram.token", obj(channels["telegram"])["token"])
+		if registry, ok := channels["registry"].(map[string]any); ok {
+			for channelID, rawChannel := range registry {
+				channel := obj(rawChannel)
+				record(fmt.Sprintf("channels.registry.%s.token", channelID), channel["token"])
+				record(fmt.Sprintf("channels.registry.%s.authToken", channelID), channel["authToken"])
+			}
+		}
+		if plugins, ok := channels["plugins"].(map[string]any); ok {
+			for channelID, rawChannel := range plugins {
+				record(fmt.Sprintf("channels.plugins.%s.authToken", channelID), obj(rawChannel)["authToken"])
+			}
+		}
+	}
+
+	tools := obj(raw["tools"])
+	if tools != nil {
+		record("tools.web.search.apiKey", obj(obj(tools["web"])["search"])["apiKey"])
+	}
+	runtime := obj(raw["runtime"])
+	if runtime != nil {
+		record("runtime.metricsHttp.authToken", obj(runtime["metricsHttp"])["authToken"])
+		if fed := obj(runtime["federation"]); fed != nil {
+			if peers, ok := fed["peers"].([]any); ok {
+				for idx, peer := range peers {
+					record(fmt.Sprintf("runtime.federation.peers[%d].authToken", idx), obj(peer)["authToken"])
+				}
+			}
+		}
+	}
+	if len(violations) == 0 {
+		return nil
+	}
+	return fmt.Errorf("plaintext secrets in config are not supported; move values to secretRef fields: %s", strings.Join(violations, ", "))
+}
+
 func applyDynamicProviderEnvOverrides(cfg *Config) {
 	const prefix = "SQUIDBOT_PROVIDER_"
 	for _, envEntry := range os.Environ() {
@@ -1897,7 +2040,7 @@ func applyDynamicProviderEnvOverrides(cfg *Config) {
 		current := cfg.Providers.Registry[providerID]
 		switch field {
 		case "api_key":
-			current.APIKey = value
+			current.APIKeyRef = "env:" + key
 		case "api_base":
 			current.APIBase = value
 		case "model":
@@ -1929,15 +2072,15 @@ func applyDynamicChannelEnvOverrides(cfg *Config) {
 		case strings.HasSuffix(rest, "_ENABLED"):
 			field = "enabled"
 			rest = strings.TrimSuffix(rest, "_ENABLED")
+		case strings.HasSuffix(rest, "_AUTH_TOKEN"):
+			field = "auth_token"
+			rest = strings.TrimSuffix(rest, "_AUTH_TOKEN")
 		case strings.HasSuffix(rest, "_TOKEN"):
 			field = "token"
 			rest = strings.TrimSuffix(rest, "_TOKEN")
 		case strings.HasSuffix(rest, "_ENDPOINT"):
 			field = "endpoint"
 			rest = strings.TrimSuffix(rest, "_ENDPOINT")
-		case strings.HasSuffix(rest, "_AUTH_TOKEN"):
-			field = "auth_token"
-			rest = strings.TrimSuffix(rest, "_AUTH_TOKEN")
 		default:
 			continue
 		}
@@ -1956,20 +2099,35 @@ func applyDynamicChannelEnvOverrides(cfg *Config) {
 				current.Enabled = enabled
 			}
 		case "token":
-			current.Token = value
+			current.TokenRef = "env:" + key
 		case "endpoint":
 			current.Endpoint = value
 		case "auth_token":
-			current.AuthToken = value
+			current.AuthTokenRef = "env:" + key
 		}
 		cfg.Channels.Registry[channelID] = current
 	}
 }
 
 func isEmptyProvider(provider ProviderConfig) bool {
-	return strings.TrimSpace(provider.APIKey) == "" &&
+	return strings.TrimSpace(provider.APIKeyRef) == "" &&
+		strings.TrimSpace(provider.APIKey) == "" &&
 		strings.TrimSpace(provider.APIBase) == "" &&
 		strings.TrimSpace(provider.Model) == "" &&
 		strings.TrimSpace(provider.OAuthAccountID) == "" &&
 		strings.TrimSpace(provider.OAuthAudience) == ""
+}
+
+func providerHasAPIKey(provider ProviderConfig) bool {
+	return strings.TrimSpace(provider.APIKey) != "" || strings.TrimSpace(provider.APIKeyRef) != ""
+}
+
+func setEnvSecretRef(target *string, envName string) {
+	if target == nil {
+		return
+	}
+	if strings.TrimSpace(os.Getenv(envName)) == "" {
+		return
+	}
+	*target = "env:" + envName
 }

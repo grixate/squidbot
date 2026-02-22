@@ -90,22 +90,22 @@ const memoryTemplate = `# Long-term Memory
 
 func EnsureFilesystem(cfg Config) error {
 	home := HomeDir()
-	if err := os.MkdirAll(home, 0o755); err != nil {
+	if err := os.MkdirAll(home, 0o700); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(DataRoot(), 0o755); err != nil {
+	if err := os.MkdirAll(DataRoot(), 0o700); err != nil {
 		return err
 	}
 	workspace := WorkspacePath(cfg)
-	if err := os.MkdirAll(workspace, 0o755); err != nil {
+	if err := os.MkdirAll(workspace, 0o700); err != nil {
 		return err
 	}
 	memoryDir := filepath.Join(workspace, "memory")
-	if err := os.MkdirAll(memoryDir, 0o755); err != nil {
+	if err := os.MkdirAll(memoryDir, 0o700); err != nil {
 		return err
 	}
 	memoryDailyDir := filepath.Join(memoryDir, "daily")
-	if err := os.MkdirAll(memoryDailyDir, 0o755); err != nil {
+	if err := os.MkdirAll(memoryDailyDir, 0o700); err != nil {
 		return err
 	}
 
@@ -114,17 +114,17 @@ func EnsureFilesystem(cfg Config) error {
 		if _, err := os.Stat(path); err == nil {
 			continue
 		}
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			return err
 		}
-		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 			return err
 		}
 	}
 
 	memoryPath := filepath.Join(memoryDir, "MEMORY.md")
 	if _, err := os.Stat(memoryPath); os.IsNotExist(err) {
-		if err := os.WriteFile(memoryPath, []byte(memoryTemplate), 0o644); err != nil {
+		if err := os.WriteFile(memoryPath, []byte(memoryTemplate), 0o600); err != nil {
 			return err
 		}
 	}

@@ -97,6 +97,7 @@ func TestCronRunCommandRequiresProviderSetup(t *testing.T) {
 
 func TestOnboardStatusDoctorCommandsRemainRunnable(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SQUIDBOT_TEST_GEMINI_KEY", "sk-gemini")
 	cfg := baseTestConfig(t)
 	configPath := writeTestConfig(t, cfg)
 
@@ -108,7 +109,7 @@ func TestOnboardStatusDoctorCommandsRemainRunnable(t *testing.T) {
 	onboard.SetArgs([]string{
 		"--non-interactive",
 		"--provider", "gemini",
-		"--api-key", "sk-gemini",
+		"--api-key-ref", "env:SQUIDBOT_TEST_GEMINI_KEY",
 		"--model", "gemini-3.0-pro",
 	})
 	if err := onboard.Execute(); err != nil {
@@ -170,6 +171,7 @@ func TestRootCommandDoesNotPrintBannerOnNoArgs(t *testing.T) {
 
 func TestOnboardCommandPrintsBanner(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SQUIDBOT_TEST_GEMINI_KEY", "sk-gemini")
 	configPath := writeTestConfig(t, baseTestConfig(t))
 
 	onboard := onboardCmd(configPath)
@@ -181,7 +183,7 @@ func TestOnboardCommandPrintsBanner(t *testing.T) {
 	onboard.SetArgs([]string{
 		"--non-interactive",
 		"--provider", "gemini",
-		"--api-key", "sk-gemini",
+		"--api-key-ref", "env:SQUIDBOT_TEST_GEMINI_KEY",
 		"--model", "gemini-3.0-pro",
 	})
 
@@ -195,6 +197,8 @@ func TestOnboardCommandPrintsBanner(t *testing.T) {
 
 func TestOnboardCommandPersistsTelegramFlagsNonInteractive(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SQUIDBOT_TEST_GEMINI_KEY", "sk-gemini")
+	t.Setenv("SQUIDBOT_TEST_TELEGRAM_TOKEN", "bot-token")
 	configPath := writeTestConfig(t, baseTestConfig(t))
 
 	onboard := onboardCmd(configPath)
@@ -205,10 +209,10 @@ func TestOnboardCommandPersistsTelegramFlagsNonInteractive(t *testing.T) {
 	onboard.SetArgs([]string{
 		"--non-interactive",
 		"--provider", "gemini",
-		"--api-key", "sk-gemini",
+		"--api-key-ref", "env:SQUIDBOT_TEST_GEMINI_KEY",
 		"--model", "gemini-3.0-pro",
 		"--telegram-enabled",
-		"--telegram-token", "bot-token",
+		"--telegram-token-ref", "env:SQUIDBOT_TEST_TELEGRAM_TOKEN",
 		"--telegram-allow-from", "123,@alice",
 		"--telegram-allow-from", "@Alice",
 	})
@@ -217,15 +221,15 @@ func TestOnboardCommandPersistsTelegramFlagsNonInteractive(t *testing.T) {
 		t.Fatalf("onboard should succeed: %v", err)
 	}
 
-	loaded, err := config.Load(configPath)
+	loaded, err := config.LoadPersistedConfig(configPath)
 	if err != nil {
 		t.Fatalf("failed to load config: %v", err)
 	}
 	if !loaded.Channels.Telegram.Enabled {
 		t.Fatal("expected telegram to be enabled")
 	}
-	if loaded.Channels.Telegram.Token != "bot-token" {
-		t.Fatalf("unexpected telegram token: %q", loaded.Channels.Telegram.Token)
+	if loaded.Channels.Telegram.TokenRef != "env:SQUIDBOT_TEST_TELEGRAM_TOKEN" {
+		t.Fatalf("unexpected telegram token ref: %q", loaded.Channels.Telegram.TokenRef)
 	}
 	wantAllow := []string{"123", "@alice"}
 	if !reflect.DeepEqual(loaded.Channels.Telegram.AllowFrom, wantAllow) {

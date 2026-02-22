@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"crypto/subtle"
 	"fmt"
 	"log"
 	"net"
@@ -288,7 +289,8 @@ func metricsHandler(metrics *telemetry.Metrics, authToken string, localhostOnly 
 		}
 		if authToken != "" {
 			token := req.Header.Get("Authorization")
-			if token != "Bearer "+authToken {
+			expected := "Bearer " + authToken
+			if len(token) != len(expected) || subtle.ConstantTimeCompare([]byte(token), []byte(expected)) != 1 {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}

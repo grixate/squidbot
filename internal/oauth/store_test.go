@@ -1,8 +1,10 @@
 package oauth
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -56,5 +58,40 @@ func TestTokenStoreRejectsInsecurePermissions(t *testing.T) {
 	}
 	if _, err := store.Load(); err == nil {
 		t.Fatal("expected insecure permissions error")
+	}
+}
+
+func TestTokenStoreEncryptsWhenKeyConfigured(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SQUIDBOT_OAUTH_STORE_KEY", "encryption-key")
+	store := NewOpenAICodexTokenStore()
+	token := Token{
+		AccessToken:  "access-enc",
+		RefreshToken: "refresh-enc",
+		ExpiresAt:    time.Now().UTC().Add(time.Hour),
+	}
+	if err := store.Save(token); err != nil {
+		t.Fatalf("save failed: %v", err)
+	}
+	raw, err := os.ReadFile(store.Path())
+	if err != nil {
+		t.Fatalf("read file: %v", err)
+	}
+	if strings.Contains(string(raw), "access-enc") {
+		t.Fatal("expected encrypted token payload")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("unmarshal encrypted payload: %v", err)
+	}
+	if encrypted, _ := payload["encrypted"].(bool); !encrypted {
+		t.Fatalf("expected encrypted marker in token file")
+	}
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatalf("load failed: %v", err)
+	}
+	if loaded.AccessToken != token.AccessToken {
+		t.Fatalf("unexpected access token after decrypt")
 	}
 }

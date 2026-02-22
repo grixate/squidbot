@@ -29,7 +29,7 @@ Default providers include OpenRouter, Anthropic, OpenAI, OpenAI Codex (OAuth), G
 Gemini:
 
 ```bash
-./squidbot onboard --non-interactive --provider gemini --api-key "$SQUIDBOT_GEMINI_API_KEY" --model gemini-3.0-pro --verify-gemini-cli --telegram-enabled --telegram-token "$SQUIDBOT_TELEGRAM_TOKEN" --telegram-allow-from 123456789 --telegram-allow-from @my_username
+./squidbot onboard --non-interactive --provider gemini --api-key-ref env:SQUIDBOT_GEMINI_API_KEY --model gemini-3.0-pro --verify-gemini-cli --telegram-enabled --telegram-token-ref env:SQUIDBOT_TELEGRAM_TOKEN --telegram-allow-from 123456789 --telegram-allow-from @my_username
 ```
 
 Ollama:
@@ -47,13 +47,13 @@ LM Studio:
 Moonshot AI:
 
 ```bash
-./squidbot onboard --non-interactive --provider moonshot --api-key "$SQUIDBOT_PROVIDER_MOONSHOT_API_KEY"
+./squidbot onboard --non-interactive --provider moonshot --api-key-ref env:SQUIDBOT_PROVIDER_MOONSHOT_API_KEY
 ```
 
 MiniMax:
 
 ```bash
-./squidbot onboard --non-interactive --provider minimax --api-key "$SQUIDBOT_PROVIDER_MINIMAX_API_KEY"
+./squidbot onboard --non-interactive --provider minimax --api-key-ref env:SQUIDBOT_PROVIDER_MINIMAX_API_KEY
 ```
 
 OpenAI Codex (OAuth):
@@ -65,8 +65,8 @@ OpenAI Codex (OAuth):
 
 Telegram flags:
 
-- `--telegram-enabled` (requires `--telegram-token` when enabled)
-- `--telegram-token <bot_token>`
+- `--telegram-enabled` (requires `--telegram-token-ref` when enabled)
+- `--telegram-token-ref <env:VAR|file:/abs/path|systemd:name>`
 - `--telegram-allow-from <id_or_username>` (repeatable, comma-separated supported)
 
 MCP flags are configured in `config.json` (not via onboard flags yet):
@@ -91,6 +91,17 @@ MCP flags are configured in `config.json` (not via onboard flags yet):
   }
 }
 ```
+
+## Secret Migration (Hard Cutover)
+
+If an existing `config.json` still contains plaintext secret values (`apiKey`, `token`, `authToken`), runtime load now fails closed.
+Use:
+
+```bash
+./squidbot secrets migrate --output-dir /etc/squidbot/credentials
+```
+
+This command writes secret files with mode `0400` and rewrites config entries to `*Ref` fields using `file:/...` references.
 
 ## Verify Setup
 

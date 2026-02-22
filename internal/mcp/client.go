@@ -76,7 +76,7 @@ func newStdioRPCClient(ctx context.Context, workspace string, cfg config.MCPServ
 	if strings.TrimSpace(workspace) != "" {
 		cmd.Dir = workspace
 	}
-	cmd.Env = os.Environ()
+	cmd.Env = filteredEnv(cfg.EnvAllowlist)
 	for key, value := range cfg.Env {
 		k := strings.TrimSpace(key)
 		v := strings.TrimSpace(value)
@@ -113,6 +113,33 @@ func newStdioRPCClient(ctx context.Context, workspace string, cfg config.MCPServ
 		return nil, err
 	}
 	return client, nil
+}
+
+func filteredEnv(allowlist []string) []string {
+	if len(allowlist) == 0 {
+		allowlist = []string{"PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR"}
+	}
+	allowed := map[string]struct{}{}
+	for _, item := range allowlist {
+		key := strings.TrimSpace(item)
+		if key == "" {
+			continue
+		}
+		allowed[key] = struct{}{}
+	}
+	env := os.Environ()
+	out := make([]string, 0, len(env))
+	for _, entry := range env {
+		parts := strings.SplitN(entry, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		if _, ok := allowed[parts[0]]; !ok {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
 }
 
 func (c *stdioRPCClient) initialize(ctx context.Context) error {

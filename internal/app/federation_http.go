@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -14,6 +15,7 @@ import (
 )
 
 const federationRunOwnershipError = "forbidden: run belongs to a different origin node"
+
 func (r *Runtime) startFederationHTTP(ctx context.Context) error {
 	if r == nil || r.Engine == nil {
 		return nil
@@ -102,7 +104,8 @@ func (r *Runtime) federationAuth(req *http.Request) (string, int, string) {
 		if !strings.EqualFold(strings.TrimSpace(peer.ID), originNodeID) {
 			continue
 		}
-		if strings.TrimSpace(peer.AuthToken) == token {
+		expected := strings.TrimSpace(peer.AuthToken)
+		if len(expected) == len(token) && subtle.ConstantTimeCompare([]byte(expected), []byte(token)) == 1 {
 			return originNodeID, 0, ""
 		}
 		return "", http.StatusUnauthorized, "invalid token"
