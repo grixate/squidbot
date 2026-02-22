@@ -1,6 +1,12 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/grixate/squidbot/internal/oauth"
+)
 
 func TestValidateActiveProvider(t *testing.T) {
 	t.Run("missing active and no legacy provider", func(t *testing.T) {
@@ -83,6 +89,34 @@ func TestValidateActiveProvider(t *testing.T) {
 		cfg := Default()
 		cfg.Providers.Active = "minimax"
 		_ = cfg.SetProviderByName("minimax", ProviderConfig{APIKey: "test-key"})
+		if err := ValidateActiveProvider(cfg); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("openai codex requires oauth token", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		cfg := Default()
+		cfg.Providers.Active = ProviderOpenAICodex
+		_ = cfg.SetProviderByName(ProviderOpenAICodex, ProviderConfig{Model: ProviderOpenAICodexDefaultModel})
+		err := ValidateActiveProvider(cfg)
+		if err == nil || !strings.Contains(err.Error(), "provider \"openai-codex\" requires oauth login") {
+			t.Fatalf("expected oauth login requirement, got %v", err)
+		}
+	})
+
+	t.Run("openai codex valid when token present", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		if err := oauth.NewOpenAICodexTokenStore().Save(oauth.Token{
+			AccessToken:  "tok",
+			RefreshToken: "ref",
+			ExpiresAt:    time.Now().UTC().Add(time.Hour),
+		}); err != nil {
+			t.Fatalf("save token: %v", err)
+		}
+		cfg := Default()
+		cfg.Providers.Active = ProviderOpenAICodex
+		_ = cfg.SetProviderByName(ProviderOpenAICodex, ProviderConfig{Model: ProviderOpenAICodexDefaultModel})
 		if err := ValidateActiveProvider(cfg); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}

@@ -3,12 +3,16 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"log"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -93,6 +97,7 @@ func TestCronRunCommandRequiresProviderSetup(t *testing.T) {
 
 func TestOnboardStatusDoctorCommandsRemainRunnable(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SQUIDBOT_TEST_GEMINI_KEY", "sk-gemini")
 	cfg := baseTestConfig(t)
 	configPath := writeTestConfig(t, cfg)
 
@@ -104,7 +109,7 @@ func TestOnboardStatusDoctorCommandsRemainRunnable(t *testing.T) {
 	onboard.SetArgs([]string{
 		"--non-interactive",
 		"--provider", "gemini",
-		"--api-key", "sk-gemini",
+		"--api-key-ref", "env:SQUIDBOT_TEST_GEMINI_KEY",
 		"--model", "gemini-3.0-pro",
 	})
 	if err := onboard.Execute(); err != nil {
@@ -166,6 +171,7 @@ func TestRootCommandDoesNotPrintBannerOnNoArgs(t *testing.T) {
 
 func TestOnboardCommandPrintsBanner(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SQUIDBOT_TEST_GEMINI_KEY", "sk-gemini")
 	configPath := writeTestConfig(t, baseTestConfig(t))
 
 	onboard := onboardCmd(configPath)
@@ -177,7 +183,7 @@ func TestOnboardCommandPrintsBanner(t *testing.T) {
 	onboard.SetArgs([]string{
 		"--non-interactive",
 		"--provider", "gemini",
-		"--api-key", "sk-gemini",
+		"--api-key-ref", "env:SQUIDBOT_TEST_GEMINI_KEY",
 		"--model", "gemini-3.0-pro",
 	})
 
@@ -191,6 +197,8 @@ func TestOnboardCommandPrintsBanner(t *testing.T) {
 
 func TestOnboardCommandPersistsTelegramFlagsNonInteractive(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SQUIDBOT_TEST_GEMINI_KEY", "sk-gemini")
+	t.Setenv("SQUIDBOT_TEST_TELEGRAM_TOKEN", "bot-token")
 	configPath := writeTestConfig(t, baseTestConfig(t))
 
 	onboard := onboardCmd(configPath)
@@ -201,10 +209,10 @@ func TestOnboardCommandPersistsTelegramFlagsNonInteractive(t *testing.T) {
 	onboard.SetArgs([]string{
 		"--non-interactive",
 		"--provider", "gemini",
-		"--api-key", "sk-gemini",
+		"--api-key-ref", "env:SQUIDBOT_TEST_GEMINI_KEY",
 		"--model", "gemini-3.0-pro",
 		"--telegram-enabled",
-		"--telegram-token", "bot-token",
+		"--telegram-token-ref", "env:SQUIDBOT_TEST_TELEGRAM_TOKEN",
 		"--telegram-allow-from", "123,@alice",
 		"--telegram-allow-from", "@Alice",
 	})
@@ -213,15 +221,15 @@ func TestOnboardCommandPersistsTelegramFlagsNonInteractive(t *testing.T) {
 		t.Fatalf("onboard should succeed: %v", err)
 	}
 
-	loaded, err := config.Load(configPath)
+	loaded, err := config.LoadPersistedConfig(configPath)
 	if err != nil {
 		t.Fatalf("failed to load config: %v", err)
 	}
 	if !loaded.Channels.Telegram.Enabled {
 		t.Fatal("expected telegram to be enabled")
 	}
-	if loaded.Channels.Telegram.Token != "bot-token" {
-		t.Fatalf("unexpected telegram token: %q", loaded.Channels.Telegram.Token)
+	if loaded.Channels.Telegram.TokenRef != "env:SQUIDBOT_TEST_TELEGRAM_TOKEN" {
+		t.Fatalf("unexpected telegram token ref: %q", loaded.Channels.Telegram.TokenRef)
 	}
 	wantAllow := []string{"123", "@alice"}
 	if !reflect.DeepEqual(loaded.Channels.Telegram.AllowFrom, wantAllow) {
@@ -260,6 +268,94 @@ func TestRootCommandDoesNotPrintBannerForSubcommand(t *testing.T) {
 	}
 	if strings.Contains(out.String(), ".oooo.o") {
 		t.Fatalf("did not expect banner output for subcommand, got: %q", out.String())
+	}
+}
+
+func TestProviderLoginStatusLogoutOpenAICodex(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	configPath := writeTestConfig(t, baseTestConfig(t))
+
+	var tokenRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		switch r.URL.Path {
+		case "/device":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"device_code":               "dev-1",
+				"user_code":                 "CODE-1",
+				"verification_uri":          "https://example.com/verify",
+				"verification_uri_complete": "https://example.com/verify?code=CODE-1",
+				"expires_in":                30,
+				"interval":                  1,
+			})
+		case "/token":
+			tokenRequests.Add(1)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"access_token":  "access-1",
+				"refresh_token": "refresh-1",
+				"expires_in":    3600,
+				"account_id":    "acct-1",
+				"audience":      "chatgpt_api",
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("SQUIDBOT_OAUTH_OPENAI_CODEX_DEVICE_AUTH_URL", server.URL+"/device")
+	t.Setenv("SQUIDBOT_OAUTH_OPENAI_CODEX_TOKEN_URL", server.URL+"/token")
+	t.Setenv("SQUIDBOT_OAUTH_OPENAI_CODEX_CLIENT_ID", "test-client")
+
+	cmd := providerCmd(configPath)
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	var loginOut bytes.Buffer
+	cmd.SetOut(&loginOut)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{"login", "openai-codex"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("provider login should succeed: %v", err)
+	}
+	if tokenRequests.Load() == 0 {
+		t.Fatal("expected token endpoint request")
+	}
+
+	statusCmd := providerCmd(configPath)
+	statusCmd.SilenceUsage = true
+	statusCmd.SilenceErrors = true
+	var statusOut bytes.Buffer
+	statusCmd.SetOut(&statusOut)
+	statusCmd.SetErr(io.Discard)
+	statusCmd.SetArgs([]string{"status", "openai-codex"})
+	if err := statusCmd.Execute(); err != nil {
+		t.Fatalf("provider status should succeed: %v", err)
+	}
+	if !strings.Contains(statusOut.String(), "Authenticated: true") {
+		t.Fatalf("unexpected provider status output: %s", statusOut.String())
+	}
+
+	logoutCmd := providerCmd(configPath)
+	logoutCmd.SilenceUsage = true
+	logoutCmd.SilenceErrors = true
+	logoutCmd.SetOut(io.Discard)
+	logoutCmd.SetErr(io.Discard)
+	logoutCmd.SetArgs([]string{"logout", "openai-codex"})
+	if err := logoutCmd.Execute(); err != nil {
+		t.Fatalf("provider logout should succeed: %v", err)
+	}
+
+	statusAfter := providerCmd(configPath)
+	statusAfter.SilenceUsage = true
+	statusAfter.SilenceErrors = true
+	var statusAfterOut bytes.Buffer
+	statusAfter.SetOut(&statusAfterOut)
+	statusAfter.SetErr(io.Discard)
+	statusAfter.SetArgs([]string{"status", "openai-codex"})
+	if err := statusAfter.Execute(); err != nil {
+		t.Fatalf("provider status post-logout should succeed: %v", err)
+	}
+	if !strings.Contains(statusAfterOut.String(), "Authenticated: false") {
+		t.Fatalf("unexpected provider status after logout: %s", statusAfterOut.String())
 	}
 }
 

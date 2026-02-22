@@ -9,7 +9,8 @@ import (
 )
 
 func TestRunOnboardingInteractiveGeminiFlashWithVerification(t *testing.T) {
-	input := strings.NewReader("4\nsk-gemini\n\n2\nn\ny\n")
+	t.Setenv("SQUIDBOT_TEST_GEMINI_KEY", "sk-gemini")
+	input := strings.NewReader("4\nenv:SQUIDBOT_TEST_GEMINI_KEY\n\n2\nn\ny\n")
 	var output strings.Builder
 	runCalled := false
 
@@ -76,7 +77,7 @@ func TestRunOnboardingNonInteractiveRequiresInputs(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if !strings.Contains(err.Error(), "requires api key") {
+	if !strings.Contains(err.Error(), "requires api key ref") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -114,7 +115,7 @@ func TestRunOnboardingNonInteractiveOllamaSuccess(t *testing.T) {
 func TestRunOnboardingNonInteractiveMoonshotSuccess(t *testing.T) {
 	result, err := RunOnboarding(context.Background(), Default(), OnboardingOptions{
 		Provider:       "moonshot",
-		APIKey:         "sk-test",
+		APIKeyRef:      "sk-test",
 		NonInteractive: true,
 	})
 	if err != nil {
@@ -132,7 +133,7 @@ func TestRunOnboardingNonInteractiveMoonshotSuccess(t *testing.T) {
 func TestRunOnboardingNonInteractiveMiniMaxSuccess(t *testing.T) {
 	result, err := RunOnboarding(context.Background(), Default(), OnboardingOptions{
 		Provider:       "minimax",
-		APIKey:         "sk-test",
+		APIKeyRef:      "sk-test",
 		NonInteractive: true,
 	})
 	if err != nil {
@@ -144,6 +145,23 @@ func TestRunOnboardingNonInteractiveMiniMaxSuccess(t *testing.T) {
 	providerCfg, _ := result.Config.ProviderByName("minimax")
 	if providerCfg.APIBase != ProviderDefaultAPIBase("minimax") {
 		t.Fatalf("unexpected minimax api base: %s", providerCfg.APIBase)
+	}
+}
+
+func TestRunOnboardingNonInteractiveOpenAICodexWarnsWhenUnauthed(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	result, err := RunOnboarding(context.Background(), Default(), OnboardingOptions{
+		Provider:       ProviderOpenAICodex,
+		NonInteractive: true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Config.Providers.Active != ProviderOpenAICodex {
+		t.Fatalf("unexpected provider: %s", result.Config.Providers.Active)
+	}
+	if len(result.Warnings) == 0 || !strings.Contains(result.Warnings[0], "provider login openai-codex") {
+		t.Fatalf("expected codex login warning, got %#v", result.Warnings)
 	}
 }
 
@@ -173,7 +191,7 @@ func TestRunOnboardingGeminiVerificationWarningInteractive(t *testing.T) {
 func TestRunOnboardingGeminiVerificationStrictNonInteractive(t *testing.T) {
 	_, err := RunOnboarding(context.Background(), Default(), OnboardingOptions{
 		Provider:        ProviderGemini,
-		APIKey:          "sk-gemini",
+		APIKeyRef:       "sk-gemini",
 		Model:           "gemini-3.0-pro",
 		NonInteractive:  true,
 		VerifyGeminiCLI: true,
@@ -218,8 +236,8 @@ func TestRunOnboardingInteractiveTelegramConfig(t *testing.T) {
 	if !result.Config.Channels.Telegram.Enabled {
 		t.Fatal("expected telegram to be enabled")
 	}
-	if result.Config.Channels.Telegram.Token != "bot-token" {
-		t.Fatalf("unexpected telegram token: %q", result.Config.Channels.Telegram.Token)
+	if result.Config.Channels.Telegram.TokenRef != "bot-token" {
+		t.Fatalf("unexpected telegram token: %q", result.Config.Channels.Telegram.TokenRef)
 	}
 	wantAllow := []string{"123", "@Alice", "456"}
 	if !reflect.DeepEqual(result.Config.Channels.Telegram.AllowFrom, wantAllow) {
@@ -236,7 +254,7 @@ func TestRunOnboardingInteractiveTelegramEnabledRequiresToken(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if !strings.Contains(err.Error(), "telegram enabled requires token") {
+	if !strings.Contains(err.Error(), "telegram enabled requires tokenRef") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -244,7 +262,7 @@ func TestRunOnboardingInteractiveTelegramEnabledRequiresToken(t *testing.T) {
 func TestRunOnboardingInteractiveTelegramDisablePreservesTokenAndAllowList(t *testing.T) {
 	cfg := Default()
 	cfg.Channels.Telegram.Enabled = true
-	cfg.Channels.Telegram.Token = "existing-token"
+	cfg.Channels.Telegram.TokenRef = "existing-token"
 	cfg.Channels.Telegram.AllowFrom = []string{"123", "@user"}
 
 	input := strings.NewReader("\n\n\nn\n")
@@ -259,8 +277,8 @@ func TestRunOnboardingInteractiveTelegramDisablePreservesTokenAndAllowList(t *te
 	if result.Config.Channels.Telegram.Enabled {
 		t.Fatal("expected telegram to be disabled")
 	}
-	if result.Config.Channels.Telegram.Token != "existing-token" {
-		t.Fatalf("unexpected token: %q", result.Config.Channels.Telegram.Token)
+	if result.Config.Channels.Telegram.TokenRef != "existing-token" {
+		t.Fatalf("unexpected token: %q", result.Config.Channels.Telegram.TokenRef)
 	}
 	wantAllow := []string{"123", "@user"}
 	if !reflect.DeepEqual(result.Config.Channels.Telegram.AllowFrom, wantAllow) {
@@ -279,7 +297,7 @@ func TestRunOnboardingNonInteractiveTelegramEnabledRequiresToken(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if !strings.Contains(err.Error(), "telegram enabled requires token") {
+	if !strings.Contains(err.Error(), "telegram enabled requires tokenRef") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -291,8 +309,8 @@ func TestRunOnboardingNonInteractiveTelegramExplicitOverrides(t *testing.T) {
 		NonInteractive:       true,
 		TelegramEnabledSet:   true,
 		TelegramEnabled:      true,
-		TelegramTokenSet:     true,
-		TelegramToken:        "bot-token",
+		TelegramTokenRefSet:  true,
+		TelegramTokenRef:     "bot-token",
 		TelegramAllowFromSet: true,
 		TelegramAllowFrom:    []string{"123,@alice", "@Alice", "456", ""},
 	})
@@ -302,8 +320,8 @@ func TestRunOnboardingNonInteractiveTelegramExplicitOverrides(t *testing.T) {
 	if !result.Config.Channels.Telegram.Enabled {
 		t.Fatal("expected telegram to be enabled")
 	}
-	if result.Config.Channels.Telegram.Token != "bot-token" {
-		t.Fatalf("unexpected token: %q", result.Config.Channels.Telegram.Token)
+	if result.Config.Channels.Telegram.TokenRef != "bot-token" {
+		t.Fatalf("unexpected token: %q", result.Config.Channels.Telegram.TokenRef)
 	}
 	wantAllow := []string{"123", "@alice", "456"}
 	if !reflect.DeepEqual(result.Config.Channels.Telegram.AllowFrom, wantAllow) {

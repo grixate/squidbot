@@ -257,6 +257,67 @@ func (s *Store) Window(ctx context.Context, sessionID string, limit int) ([]prov
 	return messages, nil
 }
 
+func (s *Store) ListTurns(_ context.Context, sessionID string, limit int) ([]agent.Turn, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil, fmt.Errorf("session id is required")
+	}
+	if limit <= 0 {
+		limit = 1000
+	}
+	prefix := []byte("turn:" + sessionID + ":")
+	turns := make([]agent.Turn, 0, min(limit, 256))
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket(bucketTurns)
+		cursor := bucket.Cursor()
+		for key, value := cursor.Seek(prefix); key != nil && strings.HasPrefix(string(key), string(prefix)); key, value = cursor.Next() {
+			var turn agent.Turn
+			if err := json.Unmarshal(value, &turn); err != nil {
+				continue
+			}
+			turns = append(turns, turn)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(turns, func(i, j int) bool {
+		return turns[i].CreatedAt.Before(turns[j].CreatedAt)
+	})
+	if len(turns) > limit {
+		turns = turns[len(turns)-limit:]
+	}
+	return turns, nil
+}
+
+func (s *Store) DeleteTurns(ctx context.Context, sessionID string, turnIDs []string) error {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return fmt.Errorf("session id is required")
+	}
+	keys := make([][]byte, 0, len(turnIDs))
+	for _, id := range turnIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		keys = append(keys, []byte(turnKey(sessionID, id)))
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	return s.runWrite(ctx, func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket(bucketTurns)
+		for _, key := range keys {
+			if err := bucket.Delete(key); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 func (s *Store) SaveSessionMeta(ctx context.Context, sessionID string, meta map[string]any) error {
 	record := map[string]any{"session_id": sessionID, "meta": meta, "updated_at": time.Now().UTC(), "version": 1}
 	bytes, err := json.Marshal(record)
@@ -309,6 +370,48 @@ func (s *Store) GetKV(_ context.Context, namespace, key string) ([]byte, error) 
 	return out, err
 }
 
+func (s *Store) DeleteKV(ctx context.Context, namespace, key string) error {
+	namespace = strings.TrimSpace(namespace)
+	key = strings.TrimSpace(key)
+	if namespace == "" || key == "" {
+		return fmt.Errorf("namespace and key are required")
+	}
+	return s.runWrite(ctx, func(tx *bbolt.Tx) error {
+		return tx.Bucket(bucketKV).Delete([]byte(kvKey(namespace, key)))
+	})
+}
+
+func (s *Store) ListKV(_ context.Context, namespace, prefix string, limit int) (map[string][]byte, error) {
+	namespace = strings.TrimSpace(namespace)
+	if namespace == "" {
+		return nil, fmt.Errorf("namespace is required")
+	}
+	prefix = strings.TrimSpace(prefix)
+	fullPrefix := []byte(kvKey(namespace, prefix))
+	if prefix == "" {
+		fullPrefix = []byte("kv:" + namespace + ":")
+	}
+	if limit <= 0 {
+		limit = 200
+	}
+	out := map[string][]byte{}
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket(bucketKV)
+		cursor := bucket.Cursor()
+		count := 0
+		for key, value := cursor.Seek(fullPrefix); key != nil && strings.HasPrefix(string(key), string(fullPrefix)); key, value = cursor.Next() {
+			rawKey := strings.TrimPrefix(string(key), "kv:"+namespace+":")
+			out[rawKey] = append([]byte(nil), value...)
+			count++
+			if count >= limit {
+				break
+			}
+		}
+		return nil
+	})
+	return out, err
+}
+
 func (s *Store) PutJob(ctx context.Context, job []byte, id string) error {
 	return s.runWrite(ctx, func(tx *bbolt.Tx) error {
 		return tx.Bucket(bucketJobs).Put([]byte(jobKey(id)), job)
@@ -356,4 +459,11 @@ func (s *Store) LoadCheckpoint(_ context.Context, sessionID string) ([]byte, err
 		return nil
 	})
 	return out, err
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

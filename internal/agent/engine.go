@@ -18,9 +18,14 @@ import (
 
 	"github.com/oklog/ulid/v2"
 
+	"github.com/grixate/squidbot/internal/branch"
 	"github.com/grixate/squidbot/internal/budget"
+	"github.com/grixate/squidbot/internal/compaction"
 	"github.com/grixate/squidbot/internal/config"
+	"github.com/grixate/squidbot/internal/contextctrl"
+	"github.com/grixate/squidbot/internal/cortex"
 	"github.com/grixate/squidbot/internal/federation"
+	"github.com/grixate/squidbot/internal/mcp"
 	"github.com/grixate/squidbot/internal/memory"
 	"github.com/grixate/squidbot/internal/mission"
 	"github.com/grixate/squidbot/internal/plugins"
@@ -56,10 +61,15 @@ type Engine struct {
 	outbound            chan OutboundMessage
 	policy              *tools.PathPolicy
 	memory              *memory.Manager
+	mcpManager          *mcp.Manager
 	plugins             plugins.Runtime
 	skills              skills.Runtime
 	subagents           *subagent.Manager
+	branches            *branch.Manager
+	compactor           *compaction.Service
+	cortex              *cortex.Service
 	budgetGuard         *budget.Guard
+	contextRegistry     *contextctrl.Registry
 	federationClient    *federation.Client
 	fedCancelMu         sync.Mutex
 	fedCancels          map[string]context.CancelFunc
@@ -71,6 +81,8 @@ type Engine struct {
 	tokenSafetyCached   budget.Settings
 	tokenSafetyCachedAt time.Time
 	tokenSafetyCacheTTL time.Duration
+	routingMu           sync.Mutex
+	modelCooldown       map[string]time.Time
 	entropy             *ulid.MonotonicEntropy
 }
 
@@ -100,10 +112,15 @@ func NewEngine(cfg config.Config, providerClient provider.LLMProvider, model str
 		policy:              policy,
 		memory:              memory.NewManager(cfg),
 		budgetGuard:         budget.NewGuard(store, metrics),
+		contextRegistry:     contextctrl.NewRegistry(cfg.ContextControl.RegistryPath, cfg.ContextControl.DefaultWindowTokens, cfg.ContextControl.OutputReserveTokens, 4.0, logger.Printf),
 		federationClient:    federation.NewClient(time.Duration(max(cfg.Runtime.Federation.RequestTimeoutSec, 1)) * time.Second),
 		fedCancels:          map[string]context.CancelFunc{},
 		tokenSafetyCacheTTL: 2 * time.Second,
+		modelCooldown:       map[string]time.Time{},
 		entropy:             ulid.Monotonic(mrand.New(mrand.NewSource(time.Now().UnixNano())), 0),
+	}
+	if cfg.Features.MCP && cfg.Tools.MCP.Enabled {
+		engine.mcpManager = mcp.NewManager(cfg.Tools.MCP, config.WorkspacePath(cfg), logger)
 	}
 	pluginRuntime := plugins.NewManager(cfg, logger)
 	if err := pluginRuntime.Discover(context.Background()); err != nil {
@@ -133,6 +150,57 @@ func NewEngine(cfg config.Config, providerClient provider.LLMProvider, model str
 	if err := engine.subagents.Start(context.Background()); err != nil {
 		return nil, err
 	}
+	engine.branches = branch.NewManager(branch.Options{
+		Enabled:        true,
+		MaxConcurrent:  max(2, cfg.Runtime.Subagents.MaxConcurrent/2),
+		MaxQueue:       max(16, cfg.Runtime.Subagents.MaxQueue),
+		DefaultTimeout: 90 * time.Second,
+		NextID:         engine.nextID,
+	}, store, engine.runBranch)
+	if err := engine.branches.Start(); err != nil {
+		return nil, err
+	}
+	engine.compactor = compaction.NewService(store, compaction.Options{
+		Enabled:                cfg.Runtime.Compaction.Enabled,
+		MaxHistoryTurns:        max(cfg.ContextControl.MaxHistoryTurns, 50),
+		KeepMinTurns:           max(cfg.ContextControl.MinHistoryTurns, 8),
+		BackgroundThresholdPct: cfg.Runtime.Compaction.BackgroundThresholdPct,
+		AggressiveThresholdPct: cfg.Runtime.Compaction.AggressiveThresholdPct,
+		EmergencyThresholdPct:  cfg.Runtime.Compaction.EmergencyThresholdPct,
+		ListTurns: func(ctx context.Context, sessionID string, limit int) ([]compaction.Turn, error) {
+			turns, err := store.ListTurns(ctx, sessionID, limit)
+			if err != nil {
+				return nil, err
+			}
+			out := make([]compaction.Turn, 0, len(turns))
+			for _, turn := range turns {
+				out = append(out, compaction.Turn{
+					ID:        turn.ID,
+					Role:      turn.Role,
+					Content:   turn.Content,
+					CreatedAt: turn.CreatedAt,
+				})
+			}
+			return out, nil
+		},
+		DeleteTurns: store.DeleteTurns,
+		AppendSummaryMarker: func(ctx context.Context, sessionID, summary string) error {
+			return store.AppendTurn(ctx, Turn{
+				SessionID: sessionID,
+				Role:      "assistant",
+				Content:   "[Compaction summary]\n" + strings.TrimSpace(summary),
+				CreatedAt: time.Now().UTC(),
+			})
+		},
+		Summarize: engine.summarizeCompactionTurns,
+	})
+	engine.cortex = cortex.NewService(store, cortex.Options{
+		Enabled:          cfg.Runtime.Cortex.Enabled,
+		Interval:         time.Duration(max(cfg.Runtime.Cortex.BulletinIntervalSec, 1)) * time.Second,
+		BulletinMaxWords: max(cfg.Runtime.Cortex.BulletinMaxWords, 32),
+		Synthesize:       engine.generateCortexBulletin,
+	})
+	engine.cortex.Start()
 	return engine, nil
 }
 
@@ -152,6 +220,15 @@ func (e *Engine) Close() error {
 		e.cancelFederationRuns()
 		if e.subagents != nil {
 			e.subagents.Stop()
+		}
+		if e.branches != nil {
+			e.branches.Stop()
+		}
+		if e.cortex != nil {
+			e.cortex.Stop()
+		}
+		if e.mcpManager != nil {
+			_ = e.mcpManager.Close()
 		}
 		if e.plugins != nil {
 			_ = e.plugins.Close()
@@ -234,15 +311,15 @@ func (e *Engine) AskStream(ctx context.Context, msg InboundMessage, sink StreamS
 	cfg := e.currentConfig()
 	providerClient, model := e.currentProviderModel()
 	if providerClient.Capabilities().SupportsStream {
-		history, err := e.store.Window(ctx, msg.SessionID, 50)
-		if err == nil {
-			skillActivation, skillErr := e.activateSkills(ctx, msg.Content, msg.Channel, msg.SessionID, false, nil)
-			if skillErr != nil {
-				_ = sink.OnEvent(ctx, StreamEvent{Type: "error", Error: skillErr.Error(), Done: true})
-				return skillErr
-			}
-			systemPrompt := buildSystemPromptWithSkills(cfg, msg.Content, &skillActivation)
-			messages := buildMessages(systemPrompt, history, msg.Content)
+		model = e.primaryModelForProcess("channel", "")
+		skillActivation, skillErr := e.activateSkills(ctx, msg.Content, msg.Channel, msg.SessionID, false, nil)
+		if skillErr != nil {
+			_ = sink.OnEvent(ctx, StreamEvent{Type: "error", Error: skillErr.Error(), Done: true})
+			return skillErr
+		}
+		built, buildErr := e.buildAdaptiveMessages(ctx, cfg, model, msg.SessionID, msg.Content, skillActivation, nil)
+		if buildErr == nil {
+			messages := built.Messages
 			events, errs := providerClient.Stream(ctx, provider.ChatRequest{
 				Messages:    messages,
 				Model:       model,
@@ -294,6 +371,9 @@ func (e *Engine) AskStream(ctx context.Context, msg InboundMessage, sink StreamS
 				e.send(msg.Channel, msg.ChatID, finalContent, map[string]interface{}{"session_id": msg.SessionID, "trace_id": traceID})
 			}
 			e.appendDailyMemory(ctx, msg, finalContent)
+			if e.compactor != nil {
+				e.compactor.ObserveTurn(ctx, msg.SessionID)
+			}
 			return sink.OnEvent(ctx, StreamEvent{Type: "final", Content: finalContent, Done: true})
 		}
 	}
@@ -503,10 +583,6 @@ func (h *sessionHandler) process(ctx context.Context, msg InboundMessage) (strin
 	turnCtx, cancel := context.WithTimeout(ctx, turnTimeout)
 	defer cancel()
 
-	history, err := h.engine.store.Window(turnCtx, h.sessionID, 50)
-	if err != nil {
-		return "", err
-	}
 	skillActivation, skillErr := h.engine.activateSkills(turnCtx, msg.Content, msg.Channel, h.sessionID, false, nil)
 	if skillErr != nil {
 		finalContent := skillErr.Error()
@@ -516,11 +592,19 @@ func (h *sessionHandler) process(ctx context.Context, msg InboundMessage) (strin
 		if msg.Channel != "cli" {
 			h.engine.send(msg.Channel, msg.ChatID, finalContent, map[string]interface{}{"session_id": msg.SessionID, "trace_id": traceID})
 		}
+		if h.engine.compactor != nil {
+			h.engine.compactor.ObserveTurn(turnCtx, h.sessionID)
+		}
 		return finalContent, nil
 	}
-	systemPrompt := buildSystemPromptWithSkills(cfg, msg.Content, &skillActivation)
-	messages := buildMessages(systemPrompt, history, msg.Content)
-	registry, err := h.engine.buildRegistry(msg)
+	model := h.engine.primaryModelForProcess("channel", "")
+	built, buildErr := h.engine.buildAdaptiveMessages(turnCtx, cfg, model, h.sessionID, msg.Content, skillActivation, nil)
+	if buildErr != nil {
+		return "", buildErr
+	}
+	messages := built.Messages
+	contextStage := built.Stage
+	registry, err := h.engine.buildRegistry(turnCtx, msg)
 	if err != nil {
 		return "", err
 	}
@@ -531,6 +615,7 @@ func (h *sessionHandler) process(ctx context.Context, msg InboundMessage) (strin
 	}
 	finalContent := ""
 	budgetWarnings := []string{}
+	contextRetryUsed := false
 
 	for i := 0; i < maxHops; i++ {
 		settings := h.engine.effectiveTokenSafety(turnCtx)
@@ -554,18 +639,28 @@ func (h *sessionHandler) process(ctx context.Context, msg InboundMessage) (strin
 			}
 			return "", preflightErr
 		}
-		h.engine.metrics.ProviderCalls.Add(1)
-		providerClient, model := h.engine.currentProviderModel()
-		response, chatErr := providerClient.Chat(turnCtx, provider.ChatRequest{
+		response, usedModel, chatErr := h.engine.chatWithRouting(turnCtx, "channel", "", provider.ChatRequest{
 			Messages:    messages,
 			Tools:       registry.Definitions(),
 			Model:       model,
 			MaxTokens:   cfg.Agents.Defaults.MaxTokens,
 			Temperature: cfg.Agents.Defaults.Temperature,
 		})
+		if strings.TrimSpace(usedModel) != "" {
+			model = usedModel
+		}
 		if chatErr != nil {
-			h.engine.budgetGuard.Abort(turnCtx, preflight)
-			h.engine.metrics.ProviderErrors.Add(1)
+			if cfg.ContextControl.Enabled && !contextRetryUsed && i == 0 && cfg.ContextControl.ContextOverflowRetryOnce && isContextLengthError(chatErr) {
+				nextStage := contextctrl.NextStricterStage(contextStage)
+				rebuilt, rebuildErr := h.engine.buildAdaptiveMessages(turnCtx, cfg, model, h.sessionID, msg.Content, skillActivation, &nextStage)
+				if rebuildErr == nil {
+					contextRetryUsed = true
+					contextStage = rebuilt.Stage
+					messages = rebuilt.Messages
+					continue
+				}
+				h.engine.log.Printf("contextctrl overflow retry fallback failed session=%s err=%v", h.sessionID, rebuildErr)
+			}
 			return "", chatErr
 		}
 		commit, commitErr := h.engine.budgetGuard.Commit(turnCtx, settings, scopeLimits, preflight, budget.Usage{
@@ -651,6 +746,9 @@ func (h *sessionHandler) process(ctx context.Context, msg InboundMessage) (strin
 		h.engine.send(msg.Channel, msg.ChatID, finalContent, map[string]interface{}{"session_id": msg.SessionID, "trace_id": traceID})
 	}
 	h.engine.appendDailyMemory(turnCtx, msg, finalContent)
+	if h.engine.compactor != nil {
+		h.engine.compactor.ObserveTurn(turnCtx, h.sessionID)
+	}
 	return finalContent, nil
 }
 
@@ -722,7 +820,7 @@ func suggestsFollowUp(content string) bool {
 	return false
 }
 
-func (e *Engine) buildRegistry(msg InboundMessage) (*tools.Registry, error) {
+func (e *Engine) buildRegistry(ctx context.Context, msg InboundMessage) (*tools.Registry, error) {
 	cfg := e.currentConfig()
 	registry := tools.NewRegistry()
 	registry.Register(tools.NewReadFileTool(e.policy))
@@ -750,6 +848,23 @@ func (e *Engine) buildRegistry(msg InboundMessage) (*tools.Registry, error) {
 	spawnTool := tools.NewSpawnTool(e.spawnSubtask)
 	spawnTool.SetContext(msg.SessionID, msg.Channel, msg.ChatID, msg.SenderID, subagentDepthFromMetadata(msg.Metadata))
 	registry.Register(spawnTool)
+
+	branchSpawnTool := tools.NewBranchSpawnTool(e.spawnBranch)
+	branchSpawnTool.SetContext(msg.SessionID)
+	registry.Register(branchSpawnTool)
+
+	branchStatusTool := tools.NewBranchStatusTool(e.branchStatus)
+	branchStatusTool.SetContext(msg.SessionID)
+	registry.Register(branchStatusTool)
+
+	branchWaitTool := tools.NewBranchWaitTool(e.branchWait)
+	branchWaitTool.SetContext(msg.SessionID)
+	registry.Register(branchWaitTool)
+
+	listTool := tools.NewSubagentListTool(e.listSubtasks)
+	listTool.SetContext(msg.SessionID)
+	registry.Register(listTool)
+
 	waitTool := tools.NewSubagentWaitTool(e.waitSubtasks)
 	waitTool.SetContext(msg.SessionID)
 	registry.Register(waitTool)
@@ -818,6 +933,13 @@ func (e *Engine) buildRegistry(msg InboundMessage) (*tools.Registry, error) {
 					return tools.ToolResult{Text: result.Text, Metadata: result.Metadata}, nil
 				},
 			})
+		}
+	}
+	if e.mcpManager != nil {
+		if err := e.mcpManager.EnsureConnected(ctx); err != nil {
+			e.log.Printf("mcp ensure connected failed: %v", err)
+		} else {
+			e.mcpManager.RegisterTools(registry)
 		}
 	}
 
@@ -964,6 +1086,64 @@ func (e *Engine) waitSubtasks(ctx context.Context, req tools.SubagentWaitRequest
 		return tools.SubagentWaitResponse{}, err
 	}
 	return tools.SubagentWaitResponse{Runs: runs}, nil
+}
+
+func (e *Engine) listSubtasks(ctx context.Context, req tools.SubagentListRequest) (tools.SubagentListResponse, error) {
+	if e.subagents == nil {
+		return tools.SubagentListResponse{}, fmt.Errorf("subagent manager is not configured")
+	}
+
+	limit := req.Limit
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 200 {
+		limit = 200
+	}
+
+	runs, err := e.subagents.ListSessionRuns(ctx, req.SessionID, 0)
+	if err != nil {
+		return tools.SubagentListResponse{}, err
+	}
+
+	statusFilter, filterActive, err := normalizeSubagentListFilter(req.Status)
+	if err != nil {
+		return tools.SubagentListResponse{}, err
+	}
+	filtered := make([]subagent.Run, 0, len(runs))
+	for _, run := range runs {
+		if filterActive {
+			if run.Status != subagent.StatusQueued && run.Status != subagent.StatusRunning {
+				continue
+			}
+		} else if statusFilter != "" && run.Status != statusFilter {
+			continue
+		}
+		filtered = append(filtered, run)
+	}
+	if len(filtered) > limit {
+		filtered = filtered[:limit]
+	}
+	return tools.SubagentListResponse{Runs: filtered}, nil
+}
+
+func normalizeSubagentListFilter(raw string) (subagent.Status, bool, error) {
+	value := strings.TrimSpace(strings.ToLower(raw))
+	switch value {
+	case "", "all":
+		return "", false, nil
+	case "active":
+		return "", true, nil
+	case string(subagent.StatusQueued),
+		string(subagent.StatusRunning),
+		string(subagent.StatusSucceeded),
+		string(subagent.StatusFailed),
+		string(subagent.StatusTimedOut),
+		string(subagent.StatusCancelled):
+		return subagent.Status(value), false, nil
+	default:
+		return "", false, fmt.Errorf("unsupported status %q", raw)
+	}
 }
 
 func (e *Engine) statusSubtask(ctx context.Context, req tools.SubagentStatusRequest) (tools.SubagentStatusResponse, error) {
@@ -1396,6 +1576,13 @@ func (e *Engine) runSubtask(ctx context.Context, run subagent.Run) (subagent.Res
 	}))
 	registry.Register(tools.NewWebSearchTool(cfg.Tools.Web.Search.APIKey, cfg.Tools.Web.Search.MaxResults))
 	registry.Register(tools.NewWebFetchTool(30000))
+	if e.mcpManager != nil {
+		if err := e.mcpManager.EnsureConnected(ctx); err != nil {
+			e.log.Printf("mcp ensure connected failed (subagent): %v", err)
+		} else {
+			e.mcpManager.RegisterTools(registry)
+		}
+	}
 
 	maxHops := cfg.Agents.Defaults.MaxToolIterations
 	if maxHops <= 0 {
@@ -1428,9 +1615,8 @@ func (e *Engine) runSubtask(ctx context.Context, run subagent.Run) (subagent.Res
 			}
 			return subagent.Result{}, preflightErr
 		}
-		e.metrics.ProviderCalls.Add(1)
-		providerClient, model := e.currentProviderModel()
-		resp, err := providerClient.Chat(ctx, provider.ChatRequest{
+		model := e.primaryModelForProcess("worker", "")
+		resp, _, err := e.chatWithRouting(ctx, "worker", "", provider.ChatRequest{
 			Messages:    messages,
 			Tools:       registry.Definitions(),
 			Model:       model,
@@ -1438,8 +1624,6 @@ func (e *Engine) runSubtask(ctx context.Context, run subagent.Run) (subagent.Res
 			Temperature: cfg.Agents.Defaults.Temperature,
 		})
 		if err != nil {
-			e.budgetGuard.Abort(ctx, preflight)
-			e.metrics.ProviderErrors.Add(1)
 			return subagent.Result{}, err
 		}
 		commit, commitErr := e.budgetGuard.Commit(ctx, settings, scopeLimits, preflight, budget.Usage{

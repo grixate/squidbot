@@ -21,10 +21,12 @@ import (
 )
 
 type fanoutProvider struct {
-	mu            sync.Mutex
-	parentCalls   int
-	subagentCalls int
-	delay         time.Duration
+	mu                    sync.Mutex
+	parentCalls           int
+	subagentCalls         int
+	activeSubagentCalls   int
+	maxConcurrentObserved int
+	delay                 time.Duration
 }
 
 func (p *fanoutProvider) Capabilities() provider.ProviderCapabilities {
@@ -41,6 +43,18 @@ func (p *fanoutProvider) Stream(ctx context.Context, req provider.ChatRequest) (
 
 func (p *fanoutProvider) Chat(ctx context.Context, req provider.ChatRequest) (provider.ChatResponse, error) {
 	if isSubagentRequest(req.Messages) {
+		p.mu.Lock()
+		p.activeSubagentCalls++
+		if p.activeSubagentCalls > p.maxConcurrentObserved {
+			p.maxConcurrentObserved = p.activeSubagentCalls
+		}
+		p.mu.Unlock()
+		defer func() {
+			p.mu.Lock()
+			p.activeSubagentCalls--
+			p.mu.Unlock()
+		}()
+
 		select {
 		case <-ctx.Done():
 			return provider.ChatResponse{}, ctx.Err()
@@ -157,7 +171,6 @@ func TestEngineFanOutFanInParallelSubagents(t *testing.T) {
 	}
 	defer engine.Close()
 
-	start := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	resp, err := engine.Ask(ctx, agent.InboundMessage{
@@ -168,7 +181,6 @@ func TestEngineFanOutFanInParallelSubagents(t *testing.T) {
 		Content:   "Run fanout with 8 subtasks and wait for all.",
 		CreatedAt: time.Now().UTC(),
 	})
-	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,14 +189,15 @@ func TestEngineFanOutFanInParallelSubagents(t *testing.T) {
 	}
 	providerStub.mu.Lock()
 	subCalls := providerStub.subagentCalls
+	maxConcurrent := providerStub.maxConcurrentObserved
 	providerStub.mu.Unlock()
 	if subCalls != 8 {
 		t.Fatalf("expected 8 subagent calls, got %d", subCalls)
 	}
-	parallelBatches := (8 + cfg.Runtime.Subagents.MaxConcurrent - 1) / cfg.Runtime.Subagents.MaxConcurrent
-	expectedParallel := time.Duration(parallelBatches) * providerStub.delay
-	maxAllowed := expectedParallel*4 + 600*time.Millisecond
-	if elapsed > maxAllowed {
-		t.Fatalf("fanout took too long (%s), expected <= %s for parallel execution", elapsed, maxAllowed)
+	if maxConcurrent < 2 {
+		t.Fatalf("expected parallel subagent execution, observed max concurrency=%d", maxConcurrent)
+	}
+	if maxConcurrent > cfg.Runtime.Subagents.MaxConcurrent {
+		t.Fatalf("observed concurrency %d exceeded configured limit %d", maxConcurrent, cfg.Runtime.Subagents.MaxConcurrent)
 	}
 }

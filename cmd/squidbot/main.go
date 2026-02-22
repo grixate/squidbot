@@ -23,6 +23,7 @@ import (
 	"github.com/grixate/squidbot/internal/config"
 	"github.com/grixate/squidbot/internal/cron"
 	"github.com/grixate/squidbot/internal/memory"
+	"github.com/grixate/squidbot/internal/oauth"
 	"github.com/grixate/squidbot/internal/plugins"
 	"github.com/grixate/squidbot/internal/skills"
 	storepkg "github.com/grixate/squidbot/internal/storage/bbolt"
@@ -68,6 +69,8 @@ func newRootCmd(logger *log.Logger) *cobra.Command {
 	root.AddCommand(skillsCmd(configPath))
 	root.AddCommand(budgetCmd(configPath))
 	root.AddCommand(doctorCmd(configPath))
+	root.AddCommand(providerCmd(configPath))
+	root.AddCommand(secretsCmd(configPath))
 	return root
 }
 
@@ -83,10 +86,22 @@ func resolvedConfigPath(path string) string {
 }
 
 func loadCfg(path string) (config.Config, error) {
-	cfg, err := config.Load(path)
+	cfg, err := config.LoadRuntimeConfig(path)
 	if err != nil {
 		return cfg, err
 	}
+	return hydrateConfigDefaults(cfg), nil
+}
+
+func loadPersistedCfg(path string) (config.Config, error) {
+	cfg, err := config.LoadPersistedConfig(path)
+	if err != nil {
+		return cfg, err
+	}
+	return hydrateConfigDefaults(cfg), nil
+}
+
+func hydrateConfigDefaults(cfg config.Config) config.Config {
 	cfg.Agents.Defaults.Workspace = config.WorkspacePath(cfg)
 	if cfg.Storage.DBPath == "" {
 		cfg.Storage.DBPath = config.DataRoot() + "/squidbot.db"
@@ -97,49 +112,49 @@ func loadCfg(path string) (config.Config, error) {
 	if len(cfg.Skills.Paths) == 0 {
 		cfg.Skills.Paths = []string{filepath.Join(cfg.Agents.Defaults.Workspace, "skills")}
 	}
-	return cfg, nil
+	return cfg
 }
 
 func onboardCmd(configPath string) *cobra.Command {
 	var providerName string
-	var apiKey string
+	var apiKeyRef string
 	var apiBase string
 	var model string
 	var nonInteractive bool
 	var verifyGeminiCLI bool
 	var telegramEnabled bool
-	var telegramToken string
+	var telegramTokenRef string
 	var telegramAllowFrom []string
 	var channelEnabledIDs []string
 	var channelEndpoints []string
-	var channelAuthTokens []string
+	var channelAuthTokenRefs []string
 
 	cmd := &cobra.Command{
 		Use:   "onboard",
 		Short: "Initialize squidbot config and workspace",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			printBanner(cmd.OutOrStdout())
-			cfg, err := loadCfg(configPath)
+			cfg, err := loadPersistedCfg(configPath)
 			if err != nil {
 				return err
 			}
 
 			result, err := config.RunOnboarding(cmd.Context(), cfg, config.OnboardingOptions{
 				Provider:             providerName,
-				APIKey:               apiKey,
+				APIKeyRef:            apiKeyRef,
 				APIBase:              apiBase,
 				Model:                model,
 				NonInteractive:       nonInteractive,
 				VerifyGeminiCLI:      verifyGeminiCLI,
 				TelegramEnabledSet:   cmd.Flags().Changed("telegram-enabled"),
 				TelegramEnabled:      telegramEnabled,
-				TelegramTokenSet:     cmd.Flags().Changed("telegram-token"),
-				TelegramToken:        telegramToken,
+				TelegramTokenRefSet:  cmd.Flags().Changed("telegram-token-ref"),
+				TelegramTokenRef:     telegramTokenRef,
 				TelegramAllowFromSet: cmd.Flags().Changed("telegram-allow-from"),
 				TelegramAllowFrom:    telegramAllowFrom,
 				ChannelEnabledIDs:    channelEnabledIDs,
 				ChannelEndpoints:     channelEndpoints,
-				ChannelAuthTokens:    channelAuthTokens,
+				ChannelAuthTokenRefs: channelAuthTokenRefs,
 				In:                   cmd.InOrStdin(),
 				Out:                  cmd.OutOrStdout(),
 			})
@@ -166,17 +181,17 @@ func onboardCmd(configPath string) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&providerName, "provider", "", "Provider id")
-	cmd.Flags().StringVar(&apiKey, "api-key", "", "Provider API key")
+	cmd.Flags().StringVar(&apiKeyRef, "api-key-ref", "", "Provider API key ref (env:, file:, systemd:)")
 	cmd.Flags().StringVar(&apiBase, "api-base", "", "Provider API base URL")
 	cmd.Flags().StringVar(&model, "model", "", "Provider model")
 	cmd.Flags().BoolVar(&nonInteractive, "non-interactive", false, "Disable prompts and require explicit inputs")
 	cmd.Flags().BoolVar(&verifyGeminiCLI, "verify-gemini-cli", false, "Verify Gemini CLI connectivity during onboarding")
 	cmd.Flags().BoolVar(&telegramEnabled, "telegram-enabled", false, "Enable Telegram channel")
-	cmd.Flags().StringVar(&telegramToken, "telegram-token", "", "Telegram bot token")
+	cmd.Flags().StringVar(&telegramTokenRef, "telegram-token-ref", "", "Telegram bot token ref (env:, file:, systemd:)")
 	cmd.Flags().StringSliceVar(&telegramAllowFrom, "telegram-allow-from", nil, "Telegram allow list entry (repeatable or comma-separated)")
 	cmd.Flags().StringSliceVar(&channelEnabledIDs, "channel-enable", nil, "Enable channel id (repeatable)")
 	cmd.Flags().StringSliceVar(&channelEndpoints, "channel-endpoint", nil, "Channel endpoint in id=url form (repeatable)")
-	cmd.Flags().StringSliceVar(&channelAuthTokens, "channel-auth-token", nil, "Channel auth token in id=token form (repeatable)")
+	cmd.Flags().StringSliceVar(&channelAuthTokenRefs, "channel-auth-token-ref", nil, "Channel auth token ref in id=ref form (repeatable)")
 	return cmd
 }
 
@@ -205,10 +220,14 @@ func statusCmd(configPath string) *cobra.Command {
 			}
 			fmt.Printf("Storage backend: %s\n", cfg.Storage.Backend)
 			fmt.Printf("Telegram enabled: %v\n", cfg.Channels.Telegram.Enabled)
-			fmt.Printf("Feature flags: streaming=%v channelsWave1=%v semanticMemory=%v plugins=%v metricsHttp=%v\n",
-				cfg.Features.Streaming, cfg.Features.ChannelsWave1, cfg.Features.SemanticMemory, cfg.Features.Plugins, cfg.Features.MetricsHTTP)
+			fmt.Printf("Feature flags: streaming=%v channelsWave1=%v semanticMemory=%v plugins=%v metricsHttp=%v codexOAuth=%v mcp=%v\n",
+				cfg.Features.Streaming, cfg.Features.ChannelsWave1, cfg.Features.SemanticMemory, cfg.Features.Plugins, cfg.Features.MetricsHTTP, cfg.Features.CodexOAuth, cfg.Features.MCP)
 			fmt.Printf("Tool policy: execEnabled=%v parentWrite=%v subagentWrite=%v\n",
 				cfg.Tools.Exec.Enabled, cfg.Tools.Filesystem.ParentWriteEnabled, cfg.Tools.Filesystem.SubagentWriteEnabled)
+			fmt.Printf("MCP tools: enabled=%v connectTimeoutSec=%d servers=%d\n",
+				cfg.Tools.MCP.Enabled, cfg.Tools.MCP.ConnectTimeoutSec, len(cfg.Tools.MCP.Servers))
+			fmt.Printf("OpenAI Codex OAuth token: %v\n",
+				oauth.NewOpenAICodexTokenStore().HasUsableToken(time.Now().UTC(), 2*time.Minute))
 			fmt.Printf("Plugins runtime: enabled=%v paths=%d timeoutSec=%d maxConcurrent=%d maxProcesses=%d\n",
 				cfg.Runtime.Plugins.Enabled, len(cfg.Runtime.Plugins.Paths), cfg.Runtime.Plugins.DefaultTimeoutSec, cfg.Runtime.Plugins.MaxConcurrent, cfg.Runtime.Plugins.MaxProcesses)
 			fmt.Printf("Cron runtime: enabled=%v tickMs=%d maxConcurrent=%d maxQueue=%d\n",
@@ -229,6 +248,19 @@ func statusCmd(configPath string) *cobra.Command {
 				cfg.Memory.Semantic.Enabled, cfg.Memory.Semantic.TopKCandidates, cfg.Memory.Semantic.RerankTopK)
 			fmt.Printf("Skills runtime: enabled=%v paths=%d maxActive=%d allowZip=%v refreshSec=%d\n",
 				cfg.Skills.Enabled, len(cfg.Skills.Paths), cfg.Skills.MaxActive, cfg.Skills.AllowZip, cfg.Skills.RefreshIntervalSec)
+			fmt.Printf("Context control: enabled=%v registry=%s defaultWindow=%d outputReserve=%d stages=%d/%d/%d history=%d..%d summary=%v(%s)\n",
+				cfg.ContextControl.Enabled,
+				cfg.ContextControl.RegistryPath,
+				cfg.ContextControl.DefaultWindowTokens,
+				cfg.ContextControl.OutputReserveTokens,
+				cfg.ContextControl.Stage1Pct,
+				cfg.ContextControl.Stage2Pct,
+				cfg.ContextControl.Stage3Pct,
+				cfg.ContextControl.MinHistoryTurns,
+				cfg.ContextControl.MaxHistoryTurns,
+				cfg.ContextControl.Summary.Enabled,
+				cfg.ContextControl.Summary.Method,
+			)
 			return nil
 		},
 	}
@@ -407,6 +439,198 @@ func telegramCmd(configPath string) *cobra.Command {
 		},
 	})
 	return root
+}
+
+func providerCmd(configPath string) *cobra.Command {
+	root := &cobra.Command{
+		Use:   "provider",
+		Short: "Manage provider authentication",
+	}
+	login := &cobra.Command{
+		Use:   "login <provider>",
+		Short: "Authenticate an OAuth-backed provider",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			providerName, err := normalizeProviderArg(args[0])
+			if err != nil {
+				return err
+			}
+			if providerName != config.ProviderOpenAICodex {
+				return fmt.Errorf("provider %q login is not implemented", providerName)
+			}
+			cfg, err := loadPersistedCfg(configPath)
+			if err != nil {
+				return err
+			}
+			providerCfg, _ := cfg.ProviderByName(providerName)
+			client := oauth.NewOpenAICodexDeviceFlowClientFromEnv()
+			if strings.TrimSpace(providerCfg.OAuthAudience) != "" && strings.TrimSpace(os.Getenv("SQUIDBOT_OAUTH_OPENAI_CODEX_AUDIENCE")) == "" {
+				client.Audience = strings.TrimSpace(providerCfg.OAuthAudience)
+			}
+			flow, err := client.Start(cmd.Context())
+			if err != nil {
+				return err
+			}
+			verificationURL := strings.TrimSpace(flow.VerificationURIComplete)
+			if verificationURL == "" {
+				verificationURL = strings.TrimSpace(flow.VerificationURI)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Open this URL to authenticate:\n%s\n", verificationURL)
+			fmt.Fprintf(cmd.OutOrStdout(), "Code: %s\n", strings.TrimSpace(flow.UserCode))
+			fmt.Fprintln(cmd.OutOrStdout(), "Waiting for authorization...")
+			token, err := client.PollToken(cmd.Context(), flow)
+			if err != nil {
+				return err
+			}
+			if strings.TrimSpace(token.AccountID) == "" {
+				token.AccountID = strings.TrimSpace(providerCfg.OAuthAccountID)
+			}
+			if strings.TrimSpace(token.Audience) == "" {
+				token.Audience = strings.TrimSpace(defaultString(providerCfg.OAuthAudience, client.Audience))
+			}
+			store := oauth.NewOpenAICodexTokenStore()
+			if err := store.Save(token); err != nil {
+				return err
+			}
+			if strings.TrimSpace(token.AccountID) != "" {
+				providerCfg.OAuthAccountID = strings.TrimSpace(token.AccountID)
+			}
+			if strings.TrimSpace(token.Audience) != "" {
+				providerCfg.OAuthAudience = strings.TrimSpace(token.Audience)
+			}
+			if strings.TrimSpace(providerCfg.Model) == "" {
+				providerCfg.Model = config.ProviderOpenAICodexDefaultModel
+			}
+			_ = cfg.SetProviderByName(providerName, providerCfg)
+			if err := config.Save(configPath, cfg); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "OAuth login completed for %s\n", providerName)
+			fmt.Fprintf(cmd.OutOrStdout(), "Token stored at %s\n", store.Path())
+			return nil
+		},
+	}
+
+	status := &cobra.Command{
+		Use:   "status <provider>",
+		Short: "Show OAuth status for a provider",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			providerName, err := normalizeProviderArg(args[0])
+			if err != nil {
+				return err
+			}
+			if providerName != config.ProviderOpenAICodex {
+				return fmt.Errorf("provider %q status is not implemented", providerName)
+			}
+			cfg, err := loadPersistedCfg(configPath)
+			if err != nil {
+				return err
+			}
+			providerCfg, _ := cfg.ProviderByName(providerName)
+			store := oauth.NewOpenAICodexTokenStore()
+			token, err := store.Load()
+			if err != nil {
+				if errors.Is(err, oauth.ErrTokenNotFound) {
+					fmt.Fprintln(cmd.OutOrStdout(), "Authenticated: false")
+					fmt.Fprintf(cmd.OutOrStdout(), "Token path: %s\n", store.Path())
+					fmt.Fprintln(cmd.OutOrStdout(), "Next: run `squidbot provider login openai-codex`")
+					return nil
+				}
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), "Authenticated: true")
+			fmt.Fprintf(cmd.OutOrStdout(), "Token path: %s\n", store.Path())
+			fmt.Fprintf(cmd.OutOrStdout(), "Account: %s\n", defaultString(token.AccountID, providerCfg.OAuthAccountID))
+			fmt.Fprintf(cmd.OutOrStdout(), "Audience: %s\n", defaultString(token.Audience, providerCfg.OAuthAudience))
+			if token.ExpiresAt.IsZero() {
+				fmt.Fprintln(cmd.OutOrStdout(), "Expires at: unknown")
+			} else {
+				fmt.Fprintf(cmd.OutOrStdout(), "Expires at: %s\n", token.ExpiresAt.UTC().Format(time.RFC3339))
+				fmt.Fprintf(cmd.OutOrStdout(), "Expired: %v\n", !time.Now().UTC().Before(token.ExpiresAt))
+			}
+			return nil
+		},
+	}
+
+	logout := &cobra.Command{
+		Use:   "logout <provider>",
+		Short: "Remove local OAuth token for a provider",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			providerName, err := normalizeProviderArg(args[0])
+			if err != nil {
+				return err
+			}
+			if providerName != config.ProviderOpenAICodex {
+				return fmt.Errorf("provider %q logout is not implemented", providerName)
+			}
+			store := oauth.NewOpenAICodexTokenStore()
+			if err := store.Delete(); err != nil {
+				return err
+			}
+			cfg, err := loadPersistedCfg(configPath)
+			if err == nil {
+				providerCfg, _ := cfg.ProviderByName(providerName)
+				providerCfg.OAuthAccountID = ""
+				_ = cfg.SetProviderByName(providerName, providerCfg)
+				_ = config.Save(configPath, cfg)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Logged out from %s\n", providerName)
+			return nil
+		},
+	}
+
+	root.AddCommand(login)
+	root.AddCommand(status)
+	root.AddCommand(logout)
+	return root
+}
+
+func secretsCmd(configPath string) *cobra.Command {
+	root := &cobra.Command{
+		Use:   "secrets",
+		Short: "Manage secret references and migration",
+	}
+	var outDir string
+	migrate := &cobra.Command{
+		Use:   "migrate",
+		Short: "Extract plaintext secrets from config.json to secure files and rewrite as secret refs",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := config.MigratePlaintextSecrets(configPath, outDir)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Migrated %d secrets\n", result.UpdatedSecrets)
+			fmt.Fprintf(cmd.OutOrStdout(), "Config: %s\n", result.ConfigPath)
+			fmt.Fprintf(cmd.OutOrStdout(), "Credentials dir: %s\n", result.OutputDir)
+			return nil
+		},
+	}
+	migrate.Flags().StringVar(&outDir, "output-dir", "/etc/squidbot/credentials", "Directory to write extracted secret files")
+	root.AddCommand(migrate)
+	return root
+}
+
+func normalizeProviderArg(raw string) (string, error) {
+	candidate := strings.TrimSpace(strings.ToLower(raw))
+	candidate = strings.ReplaceAll(candidate, "_", "-")
+	if candidate == "" {
+		return "", fmt.Errorf("provider is required")
+	}
+	normalized, ok := config.NormalizeProviderName(candidate)
+	if !ok {
+		return "", fmt.Errorf("unsupported provider %q", raw)
+	}
+	return normalized, nil
+}
+
+func defaultString(value, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value != "" {
+		return value
+	}
+	return strings.TrimSpace(fallback)
 }
 
 func cronCmd(configPath string, logger *log.Logger) *cobra.Command {
@@ -1170,6 +1394,12 @@ func doctorCmd(configPath string) *cobra.Command {
 				return err
 			}
 			problems := []string{}
+			configFile := resolvedConfigPath(configPath)
+			if info, statErr := os.Stat(configFile); statErr == nil {
+				if info.Mode().Perm()&0o077 != 0 {
+					problems = append(problems, fmt.Sprintf("config file %s has insecure permissions %04o (expected <= 0600)", configFile, info.Mode().Perm()))
+				}
+			}
 			if err := config.ValidateActiveProvider(cfg); err != nil {
 				problems = append(problems, err.Error())
 			}
@@ -1222,9 +1452,36 @@ func doctorCmd(configPath string) *cobra.Command {
 					problems = append(problems, "streaming enabled but provider model is empty")
 				}
 			}
+			if strings.EqualFold(strings.TrimSpace(cfg.Providers.Active), config.ProviderOpenAICodex) && !cfg.Features.CodexOAuth {
+				problems = append(problems, "providers.active is openai-codex but features.codexOAuth is false")
+			}
+			if cfg.Features.MCP || cfg.Tools.MCP.Enabled {
+				if cfg.Tools.MCP.Enabled && len(cfg.Tools.MCP.Servers) == 0 {
+					problems = append(problems, "tools.mcp.enabled is true but tools.mcp.servers is empty")
+				}
+				for serverName, serverCfg := range cfg.Tools.MCP.Servers {
+					if !serverCfg.Enabled {
+						continue
+					}
+					hasCommand := strings.TrimSpace(serverCfg.Command) != ""
+					hasURL := strings.TrimSpace(serverCfg.URL) != ""
+					switch {
+					case hasCommand && hasURL:
+						problems = append(problems, fmt.Sprintf("mcp server %q must configure either command or url, not both", serverName))
+					case !hasCommand && !hasURL:
+						problems = append(problems, fmt.Sprintf("mcp server %q enabled but command/url missing", serverName))
+					}
+					if len(serverCfg.EnvAllowlist) == 0 {
+						problems = append(problems, fmt.Sprintf("mcp server %q enabled but envAllowlist is empty", serverName))
+					}
+				}
+			}
 			if cfg.Features.Plugins || cfg.Runtime.Plugins.Enabled {
 				if len(cfg.Runtime.Plugins.Paths) == 0 {
 					problems = append(problems, "plugins enabled but runtime.plugins.paths is empty")
+				}
+				if len(cfg.Runtime.Plugins.EnvAllowlist) == 0 {
+					problems = append(problems, "plugins enabled but runtime.plugins.envAllowlist is empty")
 				}
 			}
 			if cfg.Features.MetricsHTTP || cfg.Runtime.MetricsHTTP.Enabled {

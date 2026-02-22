@@ -102,12 +102,16 @@ type ToolEvent struct {
 type ConversationStore interface {
 	AppendTurn(ctx context.Context, turn Turn) error
 	Window(ctx context.Context, sessionID string, limit int) ([]provider.Message, error)
+	ListTurns(ctx context.Context, sessionID string, limit int) ([]Turn, error)
+	DeleteTurns(ctx context.Context, sessionID string, turnIDs []string) error
 	SaveSessionMeta(ctx context.Context, sessionID string, meta map[string]any) error
 }
 
 type KVStore interface {
 	PutKV(ctx context.Context, namespace, key string, value []byte) error
 	GetKV(ctx context.Context, namespace, key string) ([]byte, error)
+	DeleteKV(ctx context.Context, namespace, key string) error
+	ListKV(ctx context.Context, namespace, prefix string, limit int) (map[string][]byte, error)
 }
 
 type SchedulerStore interface {

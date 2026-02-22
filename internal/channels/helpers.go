@@ -2,6 +2,7 @@ package channels
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -72,7 +73,8 @@ func requireBearerAuth(r *http.Request, token string) error {
 		return nil
 	}
 	authz := strings.TrimSpace(r.Header.Get("Authorization"))
-	if authz != "Bearer "+token {
+	expected := "Bearer " + token
+	if len(authz) != len(expected) || subtle.ConstantTimeCompare([]byte(authz), []byte(expected)) != 1 {
 		return fmt.Errorf("unauthorized")
 	}
 	return nil

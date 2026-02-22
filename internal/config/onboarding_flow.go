@@ -9,26 +9,29 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/grixate/squidbot/internal/catalog"
+	"github.com/grixate/squidbot/internal/oauth"
+	"github.com/grixate/squidbot/internal/secrets"
 )
 
 type OnboardingOptions struct {
 	Provider             string
-	APIKey               string
+	APIKeyRef            string
 	APIBase              string
 	Model                string
 	NonInteractive       bool
 	VerifyGeminiCLI      bool
 	TelegramEnabledSet   bool
 	TelegramEnabled      bool
-	TelegramTokenSet     bool
-	TelegramToken        string
+	TelegramTokenRefSet  bool
+	TelegramTokenRef     string
 	TelegramAllowFromSet bool
 	TelegramAllowFrom    []string
 	ChannelEnabledIDs    []string
 	ChannelEndpoints     []string
-	ChannelAuthTokens    []string
+	ChannelAuthTokenRefs []string
 
 	In  io.Reader
 	Out io.Writer
@@ -98,6 +101,9 @@ func RunOnboarding(ctx context.Context, cfg Config, opts OnboardingOptions) (Onb
 			result.GeminiCLIVerified = true
 		}
 	}
+	if providerName == ProviderOpenAICodex && !oauth.NewOpenAICodexTokenStore().HasUsableToken(time.Now().UTC(), 2*time.Minute) {
+		result.Warnings = append(result.Warnings, "OpenAI Codex selected but OAuth login is not available yet. Run `squidbot provider login openai-codex`.")
+	}
 
 	return result, nil
 }
@@ -128,8 +134,8 @@ func resolveOnboardingProvider(cfg Config, opts OnboardingOptions, reader *bufio
 }
 
 func applyExplicitOnboardingOverrides(providerCfg ProviderConfig, opts OnboardingOptions) ProviderConfig {
-	if value := strings.TrimSpace(opts.APIKey); value != "" {
-		providerCfg.APIKey = value
+	if value := strings.TrimSpace(opts.APIKeyRef); value != "" {
+		providerCfg.APIKeyRef = value
 	}
 	if value := strings.TrimSpace(opts.APIBase); value != "" {
 		providerCfg.APIBase = value
@@ -144,8 +150,8 @@ func fillOnboardingProviderConfig(providerName string, providerCfg *ProviderConf
 	requiredAPIKey, requiredModel, _ := ProviderRequirements(providerName)
 
 	if opts.NonInteractive {
-		if requiredAPIKey && strings.TrimSpace(providerCfg.APIKey) == "" {
-			return fmt.Errorf("provider %q requires api key in non-interactive mode (--api-key)", providerName)
+		if requiredAPIKey && strings.TrimSpace(providerCfg.APIKeyRef) == "" {
+			return fmt.Errorf("provider %q requires api key ref in non-interactive mode (--api-key-ref)", providerName)
 		}
 		if requiredModel && strings.TrimSpace(providerCfg.Model) == "" {
 			return fmt.Errorf("provider %q requires model in non-interactive mode (--model)", providerName)
@@ -153,21 +159,36 @@ func fillOnboardingProviderConfig(providerName string, providerCfg *ProviderConf
 		return nil
 	}
 
-	if requiredAPIKey {
-		value, err := promptLine(reader, out, fmt.Sprintf("Enter %s API key", providerLabel(providerName)), providerCfg.APIKey)
+	if providerName == ProviderOpenAICodex {
+		if strings.TrimSpace(providerCfg.Model) == "" {
+			providerCfg.Model = ProviderDefaultModel(providerName)
+		}
+		value, err := promptLine(reader, out, "Model for OpenAI Codex (optional)", providerCfg.Model)
 		if err != nil {
 			return err
 		}
-		providerCfg.APIKey = strings.TrimSpace(value)
-		if providerCfg.APIKey == "" {
-			return fmt.Errorf("provider %q requires api key", providerName)
+		providerCfg.Model = strings.TrimSpace(value)
+		if strings.TrimSpace(providerCfg.Model) == "" {
+			providerCfg.Model = ProviderDefaultModel(providerName)
+		}
+		return nil
+	}
+
+	if requiredAPIKey {
+		value, err := promptLine(reader, out, fmt.Sprintf("Enter %s API key ref (env:, file:, systemd:)", providerLabel(providerName)), providerCfg.APIKeyRef)
+		if err != nil {
+			return err
+		}
+		providerCfg.APIKeyRef = strings.TrimSpace(value)
+		if providerCfg.APIKeyRef == "" {
+			return fmt.Errorf("provider %q requires api key ref", providerName)
 		}
 	} else {
-		value, err := promptLine(reader, out, fmt.Sprintf("Enter %s API key (optional)", providerLabel(providerName)), providerCfg.APIKey)
+		value, err := promptLine(reader, out, fmt.Sprintf("Enter %s API key ref (optional, env:/file:/systemd:)", providerLabel(providerName)), providerCfg.APIKeyRef)
 		if err != nil {
 			return err
 		}
-		providerCfg.APIKey = strings.TrimSpace(value)
+		providerCfg.APIKeyRef = strings.TrimSpace(value)
 	}
 
 	if defaultBase := ProviderDefaultAPIBase(providerName); defaultBase != "" {
@@ -226,11 +247,11 @@ func fillOnboardingTelegramConfig(cfg *Config, opts OnboardingOptions, reader *b
 		return nil
 	}
 
-	tokenDefault := cfg.Channels.Telegram.Token
-	if opts.TelegramTokenSet {
-		tokenDefault = strings.TrimSpace(opts.TelegramToken)
+	tokenDefault := cfg.Channels.Telegram.TokenRef
+	if opts.TelegramTokenRefSet {
+		tokenDefault = strings.TrimSpace(opts.TelegramTokenRef)
 	}
-	token, err := promptLine(reader, out, "Telegram bot token", tokenDefault)
+	token, err := promptLine(reader, out, "Telegram bot token ref (env:, file:, systemd:)", tokenDefault)
 	if err != nil {
 		return err
 	}
@@ -246,7 +267,7 @@ func fillOnboardingTelegramConfig(cfg *Config, opts OnboardingOptions, reader *b
 	}
 
 	cfg.Channels.Telegram.Enabled = true
-	cfg.Channels.Telegram.Token = strings.TrimSpace(token)
+	cfg.Channels.Telegram.TokenRef = strings.TrimSpace(token)
 	cfg.Channels.Telegram.AllowFrom = normalizeAllowFrom([]string{allowListInput})
 	migrateLegacyChannels(cfg)
 	return nil
@@ -256,8 +277,8 @@ func applyExplicitTelegramOnboardingOverrides(cfg *Config, opts OnboardingOption
 	if opts.TelegramEnabledSet {
 		cfg.Channels.Telegram.Enabled = opts.TelegramEnabled
 	}
-	if opts.TelegramTokenSet {
-		cfg.Channels.Telegram.Token = strings.TrimSpace(opts.TelegramToken)
+	if opts.TelegramTokenRefSet {
+		cfg.Channels.Telegram.TokenRef = strings.TrimSpace(opts.TelegramTokenRef)
 	}
 	if opts.TelegramAllowFromSet {
 		cfg.Channels.Telegram.AllowFrom = normalizeAllowFrom(opts.TelegramAllowFrom)
@@ -287,13 +308,13 @@ func applyExplicitChannelOverrides(cfg *Config, opts OnboardingOptions) {
 		current.Endpoint = value
 		cfg.Channels.Registry[id] = current
 	}
-	for _, raw := range opts.ChannelAuthTokens {
+	for _, raw := range opts.ChannelAuthTokenRefs {
 		id, value, ok := splitKV(raw)
 		if !ok {
 			continue
 		}
 		current := cfg.Channels.Registry[id]
-		current.AuthToken = value
+		current.AuthTokenRef = value
 		cfg.Channels.Registry[id] = current
 	}
 }
@@ -304,8 +325,8 @@ func validateTelegramOnboarding(cfg Config) error {
 		if !channel.Enabled {
 			continue
 		}
-		if channelID == "telegram" && strings.TrimSpace(channel.Token) == "" {
-			return fmt.Errorf("telegram enabled requires token")
+		if channelID == "telegram" && strings.TrimSpace(channel.TokenRef) == "" {
+			return fmt.Errorf("telegram enabled requires tokenRef")
 		}
 		profile, ok := ChannelProfile(channelID)
 		if ok && profile.Kind == "plugin" && strings.TrimSpace(channel.Endpoint) == "" {
@@ -330,6 +351,14 @@ func shouldRunGeminiVerification(providerName string, opts OnboardingOptions, re
 }
 
 func verifyGeminiCLI(ctx context.Context, providerCfg ProviderConfig, opts OnboardingOptions) error {
+	if strings.TrimSpace(providerCfg.APIKey) == "" && strings.TrimSpace(providerCfg.APIKeyRef) != "" {
+		resolver := secrets.NewResolver()
+		resolved, err := resolver.Resolve(providerCfg.APIKeyRef)
+		if err != nil {
+			return fmt.Errorf("resolve gemini api key ref: %w", err)
+		}
+		providerCfg.APIKey = resolved
+	}
 	if strings.TrimSpace(providerCfg.APIKey) == "" {
 		return fmt.Errorf("cannot verify Gemini CLI without api key")
 	}
@@ -389,6 +418,7 @@ func promptProviderSelection(reader *bufio.Reader, out io.Writer) (string, error
 		ProviderGemini,
 		ProviderOllama,
 		ProviderLMStudio,
+		ProviderOpenAICodex,
 	}
 	seen := map[string]struct{}{}
 	providers := make([]string, 0, len(SupportedProviders()))
@@ -473,7 +503,8 @@ func promptGeminiModel(reader *bufio.Reader, out io.Writer, existing string) (st
 
 func promptLine(reader *bufio.Reader, out io.Writer, label, defaultValue string) (string, error) {
 	if strings.TrimSpace(defaultValue) != "" {
-		fmt.Fprintf(out, "%s [%s]: ", label, defaultValue)
+		// Do not echo potentially sensitive default values.
+		fmt.Fprintf(out, "%s [configured]: ", label)
 	} else {
 		fmt.Fprintf(out, "%s: ", label)
 	}
@@ -522,6 +553,8 @@ func providerLabel(providerName string) string {
 		return "Anthropic"
 	case ProviderOpenAI:
 		return "OpenAI"
+	case ProviderOpenAICodex:
+		return "OpenAI Codex"
 	case ProviderGemini:
 		return "Gemini"
 	case ProviderOllama:

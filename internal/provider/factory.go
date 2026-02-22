@@ -6,6 +6,7 @@ import (
 
 	"github.com/grixate/squidbot/internal/catalog"
 	"github.com/grixate/squidbot/internal/config"
+	"github.com/grixate/squidbot/internal/oauth"
 )
 
 func FromConfig(cfg config.Config) (LLMProvider, string, error) {
@@ -16,6 +17,19 @@ func FromConfig(cfg config.Config) (LLMProvider, string, error) {
 	model := cfg.Agents.Defaults.Model
 	if strings.TrimSpace(p.Model) != "" {
 		model = p.Model
+	}
+	if strings.TrimSpace(model) == "" && name == config.ProviderOpenAICodex {
+		model = config.ProviderOpenAICodexDefaultModel
+	}
+	if name == config.ProviderOpenAICodex {
+		if !cfg.Features.CodexOAuth {
+			return nil, "", fmt.Errorf("provider %q requires feature flag features.codexOAuth=true", name)
+		}
+		base := p.APIBase
+		if strings.TrimSpace(base) == "" {
+			base = config.ProviderDefaultAPIBase(name)
+		}
+		return NewOpenAICodexProvider(oauth.NewOpenAICodexTokenManager(), base, p.OAuthAccountID), model, nil
 	}
 
 	profile, hasProfile := catalog.ProviderByID(name)

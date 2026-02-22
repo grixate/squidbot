@@ -11,20 +11,22 @@ import (
 	"time"
 
 	"github.com/grixate/squidbot/internal/catalog"
+	"github.com/grixate/squidbot/internal/oauth"
 )
 
 type Config struct {
-	Agents    AgentsConfig    `json:"agents"`
-	Providers ProvidersConfig `json:"providers"`
-	Channels  ChannelsConfig  `json:"channels"`
-	Tools     ToolsConfig     `json:"tools"`
-	Features  FeaturesConfig  `json:"features"`
-	Gateway   GatewayConfig   `json:"gateway"`
-	Auth      AuthConfig      `json:"auth"`
-	Storage   StorageConfig   `json:"storage"`
-	Runtime   RuntimeConfig   `json:"runtime"`
-	Memory    MemoryConfig    `json:"memory"`
-	Skills    SkillsConfig    `json:"skills"`
+	Agents         AgentsConfig         `json:"agents"`
+	Providers      ProvidersConfig      `json:"providers"`
+	Channels       ChannelsConfig       `json:"channels"`
+	Tools          ToolsConfig          `json:"tools"`
+	Features       FeaturesConfig       `json:"features"`
+	Gateway        GatewayConfig        `json:"gateway"`
+	Auth           AuthConfig           `json:"auth"`
+	Storage        StorageConfig        `json:"storage"`
+	Runtime        RuntimeConfig        `json:"runtime"`
+	Memory         MemoryConfig         `json:"memory"`
+	Skills         SkillsConfig         `json:"skills"`
+	ContextControl ContextControlConfig `json:"contextControl"`
 }
 
 type AgentsConfig struct {
@@ -53,9 +55,12 @@ type ProvidersConfig struct {
 }
 
 type ProviderConfig struct {
-	APIKey  string `json:"apiKey"`
-	APIBase string `json:"apiBase,omitempty"`
-	Model   string `json:"model,omitempty"`
+	APIKeyRef      string `json:"apiKeyRef,omitempty"`
+	APIKey         string `json:"-"`
+	APIBase        string `json:"apiBase,omitempty"`
+	Model          string `json:"model,omitempty"`
+	OAuthAccountID string `json:"oauthAccountId,omitempty"`
+	OAuthAudience  string `json:"oauthAudience,omitempty"`
 }
 
 type ChannelsConfig struct {
@@ -67,34 +72,39 @@ type ChannelsConfig struct {
 
 type TelegramConfig struct {
 	Enabled   bool     `json:"enabled"`
-	Token     string   `json:"token"`
+	TokenRef  string   `json:"tokenRef,omitempty"`
+	Token     string   `json:"-"`
 	AllowFrom []string `json:"allowFrom"`
 }
 
 type GenericChannelConfig struct {
-	Label     string            `json:"label,omitempty"`
-	Kind      string            `json:"kind,omitempty"`
-	Enabled   bool              `json:"enabled"`
-	Token     string            `json:"token,omitempty"`
-	AllowFrom []string          `json:"allowFrom,omitempty"`
-	Endpoint  string            `json:"endpoint,omitempty"`
-	AuthToken string            `json:"authToken,omitempty"`
-	Headers   map[string]string `json:"headers,omitempty"`
-	Metadata  map[string]string `json:"metadata,omitempty"`
+	Label        string            `json:"label,omitempty"`
+	Kind         string            `json:"kind,omitempty"`
+	Enabled      bool              `json:"enabled"`
+	TokenRef     string            `json:"tokenRef,omitempty"`
+	Token        string            `json:"-"`
+	AllowFrom    []string          `json:"allowFrom,omitempty"`
+	Endpoint     string            `json:"endpoint,omitempty"`
+	AuthTokenRef string            `json:"authTokenRef,omitempty"`
+	AuthToken    string            `json:"-"`
+	Headers      map[string]string `json:"headers,omitempty"`
+	Metadata     map[string]string `json:"metadata,omitempty"`
 }
 
 type PluginChannelConfig struct {
-	Enabled   bool              `json:"enabled"`
-	Endpoint  string            `json:"endpoint,omitempty"`
-	AuthToken string            `json:"authToken,omitempty"`
-	Headers   map[string]string `json:"headers,omitempty"`
-	Metadata  map[string]string `json:"metadata,omitempty"`
+	Enabled      bool              `json:"enabled"`
+	Endpoint     string            `json:"endpoint,omitempty"`
+	AuthTokenRef string            `json:"authTokenRef,omitempty"`
+	AuthToken    string            `json:"-"`
+	Headers      map[string]string `json:"headers,omitempty"`
+	Metadata     map[string]string `json:"metadata,omitempty"`
 }
 
 type ToolsConfig struct {
 	Web        WebToolsConfig        `json:"web"`
 	Exec       ExecToolsConfig       `json:"exec"`
 	Filesystem FilesystemToolsConfig `json:"fs"`
+	MCP        MCPToolsConfig        `json:"mcp"`
 }
 
 type ExecToolsConfig struct {
@@ -108,12 +118,31 @@ type FilesystemToolsConfig struct {
 	SubagentWriteEnabled bool `json:"subagentWriteEnabled"`
 }
 
+type MCPToolsConfig struct {
+	Enabled           bool                       `json:"enabled"`
+	ConnectTimeoutSec int                        `json:"connectTimeoutSec"`
+	Servers           map[string]MCPServerConfig `json:"servers,omitempty"`
+}
+
+type MCPServerConfig struct {
+	Enabled      bool              `json:"enabled"`
+	Command      string            `json:"command,omitempty"`
+	Args         []string          `json:"args,omitempty"`
+	Env          map[string]string `json:"env,omitempty"`
+	EnvAllowlist []string          `json:"envAllowlist,omitempty"`
+	URL          string            `json:"url,omitempty"`
+	Headers      map[string]string `json:"headers,omitempty"`
+	ToolPrefix   string            `json:"toolPrefix,omitempty"`
+}
+
 type FeaturesConfig struct {
 	Streaming      bool `json:"streaming"`
 	ChannelsWave1  bool `json:"channelsWave1"`
 	SemanticMemory bool `json:"semanticMemory"`
 	Plugins        bool `json:"plugins"`
 	MetricsHTTP    bool `json:"metricsHttp"`
+	CodexOAuth     bool `json:"codexOAuth"`
+	MCP            bool `json:"mcp"`
 }
 
 type WebToolsConfig struct {
@@ -121,7 +150,8 @@ type WebToolsConfig struct {
 }
 
 type WebSearchConfig struct {
-	APIKey     string `json:"apiKey"`
+	APIKeyRef  string `json:"apiKeyRef,omitempty"`
+	APIKey     string `json:"-"`
 	MaxResults int    `json:"maxResults"`
 }
 
@@ -150,6 +180,33 @@ type RuntimeConfig struct {
 	Plugins              PluginsRuntimeConfig     `json:"plugins"`
 	MetricsHTTP          MetricsHTTPRuntimeConfig `json:"metricsHttp"`
 	TokenSafety          TokenSafetyRuntimeConfig `json:"tokenSafety"`
+	Routing              RoutingRuntimeConfig     `json:"routing"`
+	Compaction           CompactionRuntimeConfig  `json:"compaction"`
+	Cortex               CortexRuntimeConfig      `json:"cortex"`
+}
+
+type RoutingRuntimeConfig struct {
+	ChannelModel         string              `json:"channelModel,omitempty"`
+	BranchModel          string              `json:"branchModel,omitempty"`
+	WorkerModel          string              `json:"workerModel,omitempty"`
+	CompactorModel       string              `json:"compactorModel,omitempty"`
+	CortexModel          string              `json:"cortexModel,omitempty"`
+	TaskOverrides        map[string]string   `json:"taskOverrides,omitempty"`
+	Fallbacks            map[string][]string `json:"fallbacks,omitempty"`
+	RateLimitCooldownSec int                 `json:"rateLimitCooldownSec"`
+}
+
+type CompactionRuntimeConfig struct {
+	Enabled                bool `json:"enabled"`
+	BackgroundThresholdPct int  `json:"backgroundThresholdPct"`
+	AggressiveThresholdPct int  `json:"aggressiveThresholdPct"`
+	EmergencyThresholdPct  int  `json:"emergencyThresholdPct"`
+}
+
+type CortexRuntimeConfig struct {
+	Enabled             bool `json:"enabled"`
+	BulletinIntervalSec int  `json:"bulletinIntervalSec"`
+	BulletinMaxWords    int  `json:"bulletinMaxWords"`
 }
 
 type CronRuntimeConfig struct {
@@ -162,6 +219,7 @@ type CronRuntimeConfig struct {
 type PluginsRuntimeConfig struct {
 	Enabled           bool     `json:"enabled"`
 	Paths             []string `json:"paths"`
+	EnvAllowlist      []string `json:"envAllowlist,omitempty"`
 	DefaultTimeoutSec int      `json:"defaultTimeoutSec"`
 	MaxConcurrent     int      `json:"maxConcurrent"`
 	MaxProcesses      int      `json:"maxProcesses"`
@@ -170,7 +228,8 @@ type PluginsRuntimeConfig struct {
 type MetricsHTTPRuntimeConfig struct {
 	Enabled       bool   `json:"enabled"`
 	ListenAddr    string `json:"listenAddr"`
-	AuthToken     string `json:"authToken,omitempty"`
+	AuthTokenRef  string `json:"authTokenRef,omitempty"`
+	AuthToken     string `json:"-"`
 	LocalhostOnly bool   `json:"localhostOnly"`
 }
 
@@ -204,7 +263,8 @@ type TokenSafetyRuntimeConfig struct {
 type FederationPeerConfig struct {
 	ID             string   `json:"id"`
 	BaseURL        string   `json:"baseUrl"`
-	AuthToken      string   `json:"authToken,omitempty"`
+	AuthTokenRef   string   `json:"authTokenRef,omitempty"`
+	AuthToken      string   `json:"-"`
 	Enabled        bool     `json:"enabled"`
 	Capabilities   []string `json:"capabilities,omitempty"`
 	Roles          []string `json:"roles,omitempty"`
@@ -266,23 +326,54 @@ type SkillsChannelPolicyConfig struct {
 	Deny  []string `json:"deny"`
 }
 
+type ContextControlConfig struct {
+	Enabled                  bool                        `json:"enabled"`
+	RegistryPath             string                      `json:"registryPath"`
+	DefaultWindowTokens      int                         `json:"defaultWindowTokens"`
+	OutputReserveTokens      int                         `json:"outputReserveTokens"`
+	Stage1Pct                int                         `json:"stage1Pct"`
+	Stage2Pct                int                         `json:"stage2Pct"`
+	Stage3Pct                int                         `json:"stage3Pct"`
+	MaxHistoryTurns          int                         `json:"maxHistoryTurns"`
+	MinHistoryTurns          int                         `json:"minHistoryTurns"`
+	BootstrapMaxChars        int                         `json:"bootstrapMaxChars"`
+	MemorySnippetMaxChars    int                         `json:"memorySnippetMaxChars"`
+	SkillPromptMaxChars      int                         `json:"skillPromptMaxChars"`
+	ContextOverflowRetryOnce bool                        `json:"contextOverflowRetryOnce"`
+	Summary                  ContextControlSummaryConfig `json:"summary"`
+}
+
+type ContextControlSummaryConfig struct {
+	Enabled        bool   `json:"enabled"`
+	Method         string `json:"method"`
+	MaxInputTurns  int    `json:"maxInputTurns"`
+	MaxOutputChars int    `json:"maxOutputChars"`
+}
+
 type DurationValue struct {
 	time.Duration
 }
 
 const (
-	ProviderOpenRouter = "openrouter"
-	ProviderAnthropic  = "anthropic"
-	ProviderOpenAI     = "openai"
-	ProviderGemini     = "gemini"
-	ProviderOllama     = "ollama"
-	ProviderLMStudio   = "lmstudio"
+	ProviderOpenRouter  = "openrouter"
+	ProviderAnthropic   = "anthropic"
+	ProviderOpenAI      = "openai"
+	ProviderOpenAICodex = "openai-codex"
+	ProviderGemini      = "gemini"
+	ProviderOllama      = "ollama"
+	ProviderLMStudio    = "lmstudio"
+)
+
+const (
+	ProviderOpenAICodexDefaultModel   = "openai-codex/gpt-5.1-codex"
+	ProviderOpenAICodexDefaultAPIBase = "https://chatgpt.com/backend-api/codex"
 )
 
 var supportedProviders = []string{
 	ProviderOpenRouter,
 	ProviderAnthropic,
 	ProviderOpenAI,
+	ProviderOpenAICodex,
 	ProviderGemini,
 	ProviderOllama,
 	ProviderLMStudio,
@@ -381,6 +472,11 @@ func Default() Config {
 				ParentWriteEnabled:   false,
 				SubagentWriteEnabled: false,
 			},
+			MCP: MCPToolsConfig{
+				Enabled:           false,
+				ConnectTimeoutSec: 20,
+				Servers:           map[string]MCPServerConfig{},
+			},
 		},
 		Features: FeaturesConfig{
 			Streaming:      false,
@@ -388,6 +484,8 @@ func Default() Config {
 			SemanticMemory: false,
 			Plugins:        false,
 			MetricsHTTP:    false,
+			CodexOAuth:     false,
+			MCP:            false,
 		},
 		Gateway: GatewayConfig{
 			Host: "0.0.0.0",
@@ -434,6 +532,7 @@ func Default() Config {
 			Plugins: PluginsRuntimeConfig{
 				Enabled:           false,
 				Paths:             []string{filepath.Join(workspace, "plugins")},
+				EnvAllowlist:      []string{"PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR"},
 				DefaultTimeoutSec: 60,
 				MaxConcurrent:     4,
 				MaxProcesses:      8,
@@ -456,6 +555,27 @@ func Default() Config {
 				EstimateOnMissingUsage:      true,
 				EstimateCharsPerToken:       4,
 				TrustedWriters:              []string{"cli:user"},
+			},
+			Routing: RoutingRuntimeConfig{
+				ChannelModel:         "",
+				BranchModel:          "",
+				WorkerModel:          "",
+				CompactorModel:       "",
+				CortexModel:          "",
+				TaskOverrides:        map[string]string{},
+				Fallbacks:            map[string][]string{},
+				RateLimitCooldownSec: 20,
+			},
+			Compaction: CompactionRuntimeConfig{
+				Enabled:                true,
+				BackgroundThresholdPct: 72,
+				AggressiveThresholdPct: 84,
+				EmergencyThresholdPct:  94,
+			},
+			Cortex: CortexRuntimeConfig{
+				Enabled:             true,
+				BulletinIntervalSec: 120,
+				BulletinMaxWords:    180,
 			},
 		},
 		Memory: MemoryConfig{
@@ -485,6 +605,27 @@ func Default() Config {
 				Allow:    []string{},
 				Deny:     []string{},
 				Channels: map[string]SkillsChannelPolicyConfig{},
+			},
+		},
+		ContextControl: ContextControlConfig{
+			Enabled:                  false,
+			RegistryPath:             filepath.Join(workspace, ".squidbot", "model-windows.json"),
+			DefaultWindowTokens:      8192,
+			OutputReserveTokens:      1024,
+			Stage1Pct:                70,
+			Stage2Pct:                82,
+			Stage3Pct:                90,
+			MaxHistoryTurns:          50,
+			MinHistoryTurns:          8,
+			BootstrapMaxChars:        5000,
+			MemorySnippetMaxChars:    360,
+			SkillPromptMaxChars:      12000,
+			ContextOverflowRetryOnce: true,
+			Summary: ContextControlSummaryConfig{
+				Enabled:        true,
+				Method:         "model_written",
+				MaxInputTurns:  24,
+				MaxOutputChars: 1800,
 			},
 		},
 	}
@@ -524,6 +665,18 @@ func expandPath(path string) string {
 }
 
 func Load(path string) (Config, error) {
+	return LoadRuntimeConfig(path)
+}
+
+func LoadRuntimeConfig(path string) (Config, error) {
+	return load(path, true)
+}
+
+func LoadPersistedConfig(path string) (Config, error) {
+	return load(path, false)
+}
+
+func load(path string, applyRuntimeOverrides bool) (Config, error) {
 	cfg := Default()
 	if path == "" {
 		path = ConfigPath()
@@ -533,14 +686,28 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		if os.IsNotExist(err) {
 			normalizeDefaultChannels(&cfg)
-			applyEnvOverrides(&cfg)
+			if applyRuntimeOverrides {
+				applyEnvOverrides(&cfg)
+			}
 			normalizeSkillsConfig(&cfg)
+			normalizeAdvancedRuntimeConfig(&cfg)
+			normalizeContextControlConfig(&cfg)
+			if applyRuntimeOverrides {
+				if err := resolveSecretRefs(&cfg); err != nil {
+					return cfg, err
+				}
+			}
 			return cfg, nil
 		}
 		return cfg, err
 	}
 	var raw map[string]any
-	_ = json.Unmarshal(bytes, &raw)
+	if err := json.Unmarshal(bytes, &raw); err != nil {
+		return cfg, err
+	}
+	if err := validateNoPlaintextSecretsRaw(raw); err != nil {
+		return cfg, err
+	}
 	if err := json.Unmarshal(bytes, &cfg); err != nil {
 		return cfg, err
 	}
@@ -548,8 +715,17 @@ func Load(path string) (Config, error) {
 	migrateLegacyProviders(&cfg)
 	migrateLegacyChannels(&cfg)
 	normalizeDefaultChannels(&cfg)
-	applyEnvOverrides(&cfg)
+	if applyRuntimeOverrides {
+		applyEnvOverrides(&cfg)
+	}
 	normalizeSkillsConfig(&cfg)
+	normalizeAdvancedRuntimeConfig(&cfg)
+	normalizeContextControlConfig(&cfg)
+	if applyRuntimeOverrides {
+		if err := resolveSecretRefs(&cfg); err != nil {
+			return cfg, err
+		}
+	}
 	return cfg, nil
 }
 
@@ -558,14 +734,17 @@ func Save(path string, cfg Config) error {
 		path = ConfigPath()
 	}
 	path = expandPath(path)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	if err := os.Chmod(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+	return os.WriteFile(path, data, 0o600)
 }
 
 func applyEnvOverrides(cfg *Config) {
@@ -583,36 +762,53 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	env := map[string]*string{
 		"SQUIDBOT_PROVIDER_ACTIVE":            &cfg.Providers.Active,
-		"SQUIDBOT_OPENROUTER_API_KEY":         &cfg.Providers.OpenRouter.APIKey,
 		"SQUIDBOT_OPENROUTER_API_BASE":        &cfg.Providers.OpenRouter.APIBase,
 		"SQUIDBOT_OPENROUTER_MODEL":           &cfg.Providers.OpenRouter.Model,
-		"SQUIDBOT_ANTHROPIC_API_KEY":          &cfg.Providers.Anthropic.APIKey,
 		"SQUIDBOT_ANTHROPIC_MODEL":            &cfg.Providers.Anthropic.Model,
-		"SQUIDBOT_OPENAI_API_KEY":             &cfg.Providers.OpenAI.APIKey,
 		"SQUIDBOT_OPENAI_API_BASE":            &cfg.Providers.OpenAI.APIBase,
 		"SQUIDBOT_OPENAI_MODEL":               &cfg.Providers.OpenAI.Model,
-		"SQUIDBOT_GEMINI_API_KEY":             &cfg.Providers.Gemini.APIKey,
 		"SQUIDBOT_GEMINI_API_BASE":            &cfg.Providers.Gemini.APIBase,
 		"SQUIDBOT_GEMINI_MODEL":               &cfg.Providers.Gemini.Model,
-		"SQUIDBOT_OLLAMA_API_KEY":             &cfg.Providers.Ollama.APIKey,
 		"SQUIDBOT_OLLAMA_API_BASE":            &cfg.Providers.Ollama.APIBase,
 		"SQUIDBOT_OLLAMA_MODEL":               &cfg.Providers.Ollama.Model,
-		"SQUIDBOT_LMSTUDIO_API_KEY":           &cfg.Providers.LMStudio.APIKey,
 		"SQUIDBOT_LMSTUDIO_API_BASE":          &cfg.Providers.LMStudio.APIBase,
 		"SQUIDBOT_LMSTUDIO_MODEL":             &cfg.Providers.LMStudio.Model,
-		"SQUIDBOT_TELEGRAM_TOKEN":             &cfg.Channels.Telegram.Token,
-		"SQUIDBOT_BRAVE_API_KEY":              &cfg.Tools.Web.Search.APIKey,
 		"SQUIDBOT_MEMORY_INDEX_PATH":          &cfg.Memory.IndexPath,
 		"SQUIDBOT_MEMORY_EMBEDDINGS_PROVIDER": &cfg.Memory.EmbeddingsProvider,
 		"SQUIDBOT_MEMORY_EMBEDDINGS_MODEL":    &cfg.Memory.EmbeddingsModel,
 		"SQUIDBOT_METRICS_HTTP_LISTEN_ADDR":   &cfg.Runtime.MetricsHTTP.ListenAddr,
-		"SQUIDBOT_METRICS_HTTP_AUTH_TOKEN":    &cfg.Runtime.MetricsHTTP.AuthToken,
 	}
 	for key, target := range env {
 		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
 			*target = value
 		}
 	}
+	setEnvSecretRef(&cfg.Providers.OpenRouter.APIKeyRef, "SQUIDBOT_OPENROUTER_API_KEY")
+	setEnvSecretRef(&cfg.Providers.Anthropic.APIKeyRef, "SQUIDBOT_ANTHROPIC_API_KEY")
+	setEnvSecretRef(&cfg.Providers.OpenAI.APIKeyRef, "SQUIDBOT_OPENAI_API_KEY")
+	setEnvSecretRef(&cfg.Providers.Gemini.APIKeyRef, "SQUIDBOT_GEMINI_API_KEY")
+	setEnvSecretRef(&cfg.Providers.Ollama.APIKeyRef, "SQUIDBOT_OLLAMA_API_KEY")
+	setEnvSecretRef(&cfg.Providers.LMStudio.APIKeyRef, "SQUIDBOT_LMSTUDIO_API_KEY")
+	setEnvSecretRef(&cfg.Channels.Telegram.TokenRef, "SQUIDBOT_TELEGRAM_TOKEN")
+	setEnvSecretRef(&cfg.Tools.Web.Search.APIKeyRef, "SQUIDBOT_BRAVE_API_KEY")
+	setEnvSecretRef(&cfg.Runtime.MetricsHTTP.AuthTokenRef, "SQUIDBOT_METRICS_HTTP_AUTH_TOKEN")
+	if cfg.Providers.Registry == nil {
+		cfg.Providers.Registry = map[string]ProviderConfig{}
+	}
+	codex := cfg.Providers.Registry[ProviderOpenAICodex]
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_OPENAI_CODEX_API_BASE")); value != "" {
+		codex.APIBase = value
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_OPENAI_CODEX_MODEL")); value != "" {
+		codex.Model = value
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_OPENAI_CODEX_OAUTH_ACCOUNT_ID")); value != "" {
+		codex.OAuthAccountID = value
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_OPENAI_CODEX_OAUTH_AUDIENCE")); value != "" {
+		codex.OAuthAudience = value
+	}
+	cfg.Providers.Registry[ProviderOpenAICodex] = codex
 
 	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_TELEGRAM_ENABLED")); value != "" {
 		parsed, err := strconv.ParseBool(value)
@@ -645,6 +841,16 @@ func applyEnvOverrides(cfg *Config) {
 			cfg.Features.MetricsHTTP = parsed
 		}
 	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_FEATURE_CODEX_OAUTH")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			cfg.Features.CodexOAuth = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_FEATURE_MCP")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			cfg.Features.MCP = parsed
+		}
+	}
 	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_TOOLS_EXEC_ENABLED")); value != "" {
 		if parsed, err := strconv.ParseBool(value); err == nil {
 			cfg.Tools.Exec.Enabled = parsed
@@ -666,6 +872,16 @@ func applyEnvOverrides(cfg *Config) {
 			cfg.Tools.Filesystem.SubagentWriteEnabled = parsed
 		}
 	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_TOOLS_MCP_ENABLED")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			cfg.Tools.MCP.Enabled = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_TOOLS_MCP_CONNECT_TIMEOUT_SEC")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.Tools.MCP.ConnectTimeoutSec = parsed
+		}
+	}
 	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_RUNTIME_PLUGINS_ENABLED")); value != "" {
 		if parsed, err := strconv.ParseBool(value); err == nil {
 			cfg.Runtime.Plugins.Enabled = parsed
@@ -673,6 +889,9 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_RUNTIME_PLUGINS_PATHS")); value != "" {
 		cfg.Runtime.Plugins.Paths = splitCSV(value)
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_RUNTIME_PLUGINS_ENV_ALLOWLIST")); value != "" {
+		cfg.Runtime.Plugins.EnvAllowlist = splitCSV(value)
 	}
 	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_RUNTIME_PLUGINS_DEFAULT_TIMEOUT_SEC")); value != "" {
 		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
@@ -957,6 +1176,137 @@ func applyEnvOverrides(cfg *Config) {
 	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_TOKEN_SAFETY_TRUSTED_WRITERS")); value != "" {
 		cfg.Runtime.TokenSafety.TrustedWriters = splitCSV(value)
 	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_RUNTIME_ROUTING_CHANNEL_MODEL")); value != "" {
+		cfg.Runtime.Routing.ChannelModel = value
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_RUNTIME_ROUTING_BRANCH_MODEL")); value != "" {
+		cfg.Runtime.Routing.BranchModel = value
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_RUNTIME_ROUTING_WORKER_MODEL")); value != "" {
+		cfg.Runtime.Routing.WorkerModel = value
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_RUNTIME_ROUTING_COMPACTOR_MODEL")); value != "" {
+		cfg.Runtime.Routing.CompactorModel = value
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_RUNTIME_ROUTING_CORTEX_MODEL")); value != "" {
+		cfg.Runtime.Routing.CortexModel = value
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_RUNTIME_ROUTING_RATE_LIMIT_COOLDOWN_SEC")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed >= 0 {
+			cfg.Runtime.Routing.RateLimitCooldownSec = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_RUNTIME_COMPACTION_ENABLED")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			cfg.Runtime.Compaction.Enabled = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_RUNTIME_COMPACTION_BACKGROUND_THRESHOLD_PCT")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil {
+			cfg.Runtime.Compaction.BackgroundThresholdPct = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_RUNTIME_COMPACTION_AGGRESSIVE_THRESHOLD_PCT")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil {
+			cfg.Runtime.Compaction.AggressiveThresholdPct = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_RUNTIME_COMPACTION_EMERGENCY_THRESHOLD_PCT")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil {
+			cfg.Runtime.Compaction.EmergencyThresholdPct = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_RUNTIME_CORTEX_ENABLED")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			cfg.Runtime.Cortex.Enabled = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_RUNTIME_CORTEX_BULLETIN_INTERVAL_SEC")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.Runtime.Cortex.BulletinIntervalSec = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_RUNTIME_CORTEX_BULLETIN_MAX_WORDS")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.Runtime.Cortex.BulletinMaxWords = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_CONTEXT_CONTROL_ENABLED")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			cfg.ContextControl.Enabled = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_CONTEXT_CONTROL_REGISTRY_PATH")); value != "" {
+		cfg.ContextControl.RegistryPath = value
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_CONTEXT_CONTROL_DEFAULT_WINDOW_TOKENS")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.ContextControl.DefaultWindowTokens = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_CONTEXT_CONTROL_OUTPUT_RESERVE_TOKENS")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.ContextControl.OutputReserveTokens = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_CONTEXT_CONTROL_STAGE1_PCT")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.ContextControl.Stage1Pct = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_CONTEXT_CONTROL_STAGE2_PCT")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.ContextControl.Stage2Pct = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_CONTEXT_CONTROL_STAGE3_PCT")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.ContextControl.Stage3Pct = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_CONTEXT_CONTROL_MAX_HISTORY_TURNS")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.ContextControl.MaxHistoryTurns = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_CONTEXT_CONTROL_MIN_HISTORY_TURNS")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.ContextControl.MinHistoryTurns = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_CONTEXT_CONTROL_BOOTSTRAP_MAX_CHARS")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.ContextControl.BootstrapMaxChars = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_CONTEXT_CONTROL_MEMORY_SNIPPET_MAX_CHARS")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.ContextControl.MemorySnippetMaxChars = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_CONTEXT_CONTROL_SKILL_PROMPT_MAX_CHARS")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.ContextControl.SkillPromptMaxChars = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_CONTEXT_CONTROL_SUMMARY_ENABLED")); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			cfg.ContextControl.Summary.Enabled = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_CONTEXT_CONTROL_SUMMARY_METHOD")); value != "" {
+		cfg.ContextControl.Summary.Method = strings.ToLower(strings.TrimSpace(value))
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_CONTEXT_CONTROL_SUMMARY_MAX_INPUT_TURNS")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.ContextControl.Summary.MaxInputTurns = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("SQUIDBOT_CONTEXT_CONTROL_SUMMARY_MAX_OUTPUT_CHARS")); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			cfg.ContextControl.Summary.MaxOutputChars = parsed
+		}
+	}
 	applyDynamicProviderEnvOverrides(cfg)
 	applyDynamicChannelEnvOverrides(cfg)
 	migrateLegacyProviders(cfg)
@@ -964,6 +1314,9 @@ func applyEnvOverrides(cfg *Config) {
 	normalizeDefaultChannels(cfg)
 	normalizeSkillsConfig(cfg)
 	normalizeCronRuntimeConfig(cfg)
+	normalizeMCPConfig(cfg)
+	normalizeAdvancedRuntimeConfig(cfg)
+	normalizeContextControlConfig(cfg)
 }
 
 func splitCSV(value string) []string {
@@ -977,6 +1330,13 @@ func splitCSV(value string) []string {
 		out = append(out, trimmed)
 	}
 	return out
+}
+
+func maxInt(v, floor int) int {
+	if v < floor {
+		return floor
+	}
+	return v
 }
 
 func normalizeSkillsConfig(cfg *Config) {
@@ -1025,6 +1385,198 @@ func normalizeCronRuntimeConfig(cfg *Config) {
 	}
 }
 
+func normalizeMCPConfig(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	if cfg.Tools.MCP.ConnectTimeoutSec <= 0 {
+		cfg.Tools.MCP.ConnectTimeoutSec = 20
+	}
+	if cfg.Tools.MCP.Servers == nil {
+		cfg.Tools.MCP.Servers = map[string]MCPServerConfig{}
+	}
+	normalized := make(map[string]MCPServerConfig, len(cfg.Tools.MCP.Servers))
+	for rawName, rawCfg := range cfg.Tools.MCP.Servers {
+		name := strings.TrimSpace(rawName)
+		if name == "" {
+			continue
+		}
+		next := MCPServerConfig{
+			Enabled:      rawCfg.Enabled,
+			Command:      strings.TrimSpace(rawCfg.Command),
+			Args:         append([]string(nil), rawCfg.Args...),
+			Env:          map[string]string{},
+			EnvAllowlist: []string{},
+			URL:          strings.TrimSpace(rawCfg.URL),
+			Headers:      map[string]string{},
+			ToolPrefix:   strings.TrimSpace(rawCfg.ToolPrefix),
+		}
+		if len(rawCfg.EnvAllowlist) > 0 {
+			seenEnv := map[string]struct{}{}
+			for _, item := range rawCfg.EnvAllowlist {
+				name := strings.TrimSpace(item)
+				if name == "" {
+					continue
+				}
+				if _, exists := seenEnv[name]; exists {
+					continue
+				}
+				seenEnv[name] = struct{}{}
+				next.EnvAllowlist = append(next.EnvAllowlist, name)
+			}
+		}
+		if len(next.EnvAllowlist) == 0 {
+			next.EnvAllowlist = []string{"PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR"}
+		}
+		if len(rawCfg.Env) > 0 {
+			next.Env = make(map[string]string, len(rawCfg.Env))
+			for key, value := range rawCfg.Env {
+				k := strings.TrimSpace(key)
+				v := strings.TrimSpace(value)
+				if k == "" || v == "" {
+					continue
+				}
+				next.Env[k] = v
+			}
+		}
+		if len(rawCfg.Headers) > 0 {
+			next.Headers = make(map[string]string, len(rawCfg.Headers))
+			for key, value := range rawCfg.Headers {
+				k := strings.TrimSpace(key)
+				v := strings.TrimSpace(value)
+				if k == "" || v == "" {
+					continue
+				}
+				next.Headers[k] = v
+			}
+		}
+		normalized[name] = next
+	}
+	cfg.Tools.MCP.Servers = normalized
+}
+
+func normalizeAdvancedRuntimeConfig(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	if cfg.Runtime.Routing.TaskOverrides == nil {
+		cfg.Runtime.Routing.TaskOverrides = map[string]string{}
+	}
+	if cfg.Runtime.Routing.Fallbacks == nil {
+		cfg.Runtime.Routing.Fallbacks = map[string][]string{}
+	}
+	if cfg.Runtime.Routing.RateLimitCooldownSec < 0 {
+		cfg.Runtime.Routing.RateLimitCooldownSec = 0
+	}
+	if cfg.Runtime.Routing.RateLimitCooldownSec == 0 {
+		cfg.Runtime.Routing.RateLimitCooldownSec = 20
+	}
+	if cfg.Runtime.Compaction.BackgroundThresholdPct <= 0 {
+		cfg.Runtime.Compaction.BackgroundThresholdPct = 72
+	}
+	if cfg.Runtime.Compaction.AggressiveThresholdPct <= 0 {
+		cfg.Runtime.Compaction.AggressiveThresholdPct = 84
+	}
+	if cfg.Runtime.Compaction.EmergencyThresholdPct <= 0 {
+		cfg.Runtime.Compaction.EmergencyThresholdPct = 94
+	}
+	if cfg.Runtime.Compaction.AggressiveThresholdPct < cfg.Runtime.Compaction.BackgroundThresholdPct {
+		cfg.Runtime.Compaction.AggressiveThresholdPct = cfg.Runtime.Compaction.BackgroundThresholdPct
+	}
+	if cfg.Runtime.Compaction.EmergencyThresholdPct < cfg.Runtime.Compaction.AggressiveThresholdPct {
+		cfg.Runtime.Compaction.EmergencyThresholdPct = cfg.Runtime.Compaction.AggressiveThresholdPct
+	}
+	if cfg.Runtime.Compaction.BackgroundThresholdPct > 100 {
+		cfg.Runtime.Compaction.BackgroundThresholdPct = 100
+	}
+	if cfg.Runtime.Compaction.AggressiveThresholdPct > 100 {
+		cfg.Runtime.Compaction.AggressiveThresholdPct = 100
+	}
+	if cfg.Runtime.Compaction.EmergencyThresholdPct > 100 {
+		cfg.Runtime.Compaction.EmergencyThresholdPct = 100
+	}
+	if cfg.Runtime.Cortex.BulletinIntervalSec <= 0 {
+		cfg.Runtime.Cortex.BulletinIntervalSec = 120
+	}
+	if cfg.Runtime.Cortex.BulletinMaxWords <= 0 {
+		cfg.Runtime.Cortex.BulletinMaxWords = 180
+	}
+	if len(cfg.Runtime.Plugins.EnvAllowlist) == 0 {
+		cfg.Runtime.Plugins.EnvAllowlist = []string{"PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR"}
+	}
+}
+
+func normalizeContextControlConfig(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	workspace := WorkspacePath(*cfg)
+	if strings.TrimSpace(cfg.ContextControl.RegistryPath) == "" {
+		cfg.ContextControl.RegistryPath = filepath.Join(workspace, ".squidbot", "model-windows.json")
+	}
+	if !filepath.IsAbs(cfg.ContextControl.RegistryPath) {
+		cfg.ContextControl.RegistryPath = filepath.Join(workspace, cfg.ContextControl.RegistryPath)
+	}
+	if cfg.ContextControl.DefaultWindowTokens <= 0 {
+		cfg.ContextControl.DefaultWindowTokens = 8192
+	}
+	if cfg.ContextControl.OutputReserveTokens <= 0 {
+		cfg.ContextControl.OutputReserveTokens = 1024
+	}
+	if cfg.ContextControl.OutputReserveTokens >= cfg.ContextControl.DefaultWindowTokens {
+		cfg.ContextControl.OutputReserveTokens = maxInt(cfg.ContextControl.DefaultWindowTokens/4, 1)
+	}
+	if cfg.ContextControl.Stage1Pct <= 0 {
+		cfg.ContextControl.Stage1Pct = 70
+	}
+	if cfg.ContextControl.Stage2Pct <= 0 {
+		cfg.ContextControl.Stage2Pct = 82
+	}
+	if cfg.ContextControl.Stage3Pct <= 0 {
+		cfg.ContextControl.Stage3Pct = 90
+	}
+	if cfg.ContextControl.Stage2Pct < cfg.ContextControl.Stage1Pct {
+		cfg.ContextControl.Stage2Pct = cfg.ContextControl.Stage1Pct
+	}
+	if cfg.ContextControl.Stage3Pct < cfg.ContextControl.Stage2Pct {
+		cfg.ContextControl.Stage3Pct = cfg.ContextControl.Stage2Pct
+	}
+	if cfg.ContextControl.Stage3Pct > 100 {
+		cfg.ContextControl.Stage3Pct = 100
+	}
+	if cfg.ContextControl.MaxHistoryTurns <= 0 {
+		cfg.ContextControl.MaxHistoryTurns = 50
+	}
+	if cfg.ContextControl.MinHistoryTurns <= 0 {
+		cfg.ContextControl.MinHistoryTurns = 8
+	}
+	if cfg.ContextControl.MinHistoryTurns > cfg.ContextControl.MaxHistoryTurns {
+		cfg.ContextControl.MinHistoryTurns = cfg.ContextControl.MaxHistoryTurns
+	}
+	if cfg.ContextControl.BootstrapMaxChars <= 0 {
+		cfg.ContextControl.BootstrapMaxChars = 5000
+	}
+	if cfg.ContextControl.MemorySnippetMaxChars <= 0 {
+		cfg.ContextControl.MemorySnippetMaxChars = 360
+	}
+	if cfg.ContextControl.SkillPromptMaxChars <= 0 {
+		cfg.ContextControl.SkillPromptMaxChars = 12000
+	}
+	if strings.TrimSpace(cfg.ContextControl.Summary.Method) == "" {
+		cfg.ContextControl.Summary.Method = "model_written"
+	}
+	cfg.ContextControl.Summary.Method = strings.ToLower(strings.TrimSpace(cfg.ContextControl.Summary.Method))
+	if cfg.ContextControl.Summary.Method != "model_written" && cfg.ContextControl.Summary.Method != "trim_only" {
+		cfg.ContextControl.Summary.Method = "model_written"
+	}
+	if cfg.ContextControl.Summary.MaxInputTurns <= 0 {
+		cfg.ContextControl.Summary.MaxInputTurns = 24
+	}
+	if cfg.ContextControl.Summary.MaxOutputChars <= 0 {
+		cfg.ContextControl.Summary.MaxOutputChars = 1800
+	}
+}
+
 func (c Config) PrimaryProvider() (name string, provider ProviderConfig) {
 	if normalized, ok := NormalizeProviderName(c.Providers.Active); ok {
 		if selected, exists := c.ProviderByName(normalized); exists {
@@ -1042,16 +1594,16 @@ func (c Config) legacyPrimaryProvider() (name string, provider ProviderConfig) {
 			}
 		}
 	}
-	if strings.TrimSpace(c.Providers.OpenRouter.APIKey) != "" {
+	if providerHasAPIKey(c.Providers.OpenRouter) {
 		return ProviderOpenRouter, c.Providers.OpenRouter
 	}
-	if strings.TrimSpace(c.Providers.Anthropic.APIKey) != "" {
+	if providerHasAPIKey(c.Providers.Anthropic) {
 		return ProviderAnthropic, c.Providers.Anthropic
 	}
-	if strings.TrimSpace(c.Providers.OpenAI.APIKey) != "" {
+	if providerHasAPIKey(c.Providers.OpenAI) {
 		return ProviderOpenAI, c.Providers.OpenAI
 	}
-	if strings.TrimSpace(c.Providers.Gemini.APIKey) != "" {
+	if providerHasAPIKey(c.Providers.Gemini) {
 		return ProviderGemini, c.Providers.Gemini
 	}
 	return "", ProviderConfig{}
@@ -1107,6 +1659,8 @@ func (c Config) ProviderByName(name string) (ProviderConfig, bool) {
 		return c.Providers.Anthropic, true
 	case ProviderOpenAI:
 		return c.Providers.OpenAI, true
+	case ProviderOpenAICodex:
+		return c.Providers.Registry[ProviderOpenAICodex], true
 	case ProviderGemini:
 		return c.Providers.Gemini, true
 	case ProviderOllama:
@@ -1151,6 +1705,9 @@ func ProviderDefaultAPIBase(name string) string {
 	if !ok {
 		return ""
 	}
+	if normalized == ProviderOpenAICodex {
+		return ProviderOpenAICodexDefaultAPIBase
+	}
 	if profile, exists := catalog.ProviderByID(normalized); exists {
 		return strings.TrimSpace(profile.DefaultAPIBase)
 	}
@@ -1161,6 +1718,9 @@ func ProviderDefaultModel(name string) string {
 	normalized, ok := NormalizeProviderName(name)
 	if !ok {
 		return ""
+	}
+	if normalized == ProviderOpenAICodex {
+		return ProviderOpenAICodexDefaultModel
 	}
 	if profile, exists := catalog.ProviderByID(normalized); exists {
 		return strings.TrimSpace(profile.DefaultModel)
@@ -1203,6 +1763,9 @@ func ProviderRequirements(name string) (requiresAPIKey, requiresModel bool, ok b
 	if !ok {
 		return false, false, false
 	}
+	if normalized == ProviderOpenAICodex {
+		return false, false, true
+	}
 	if profile, exists := catalog.ProviderByID(normalized); exists {
 		return profile.RequiresAPIKey, profile.RequiresModel, true
 	}
@@ -1213,11 +1776,17 @@ func ProviderRequirements(name string) (requiresAPIKey, requiresModel bool, ok b
 }
 
 func validateProviderConfig(name string, provider ProviderConfig) error {
+	if name == ProviderOpenAICodex {
+		if !oauth.NewOpenAICodexTokenStore().HasUsableToken(time.Now().UTC(), 2*time.Minute) {
+			return fmt.Errorf("provider %q requires oauth login. Run `squidbot provider login openai-codex`", name)
+		}
+		return nil
+	}
 	requiresAPIKey, requiresModel, ok := ProviderRequirements(name)
 	if !ok {
 		return fmt.Errorf("unsupported provider %q", name)
 	}
-	if requiresAPIKey && strings.TrimSpace(provider.APIKey) == "" {
+	if requiresAPIKey && !providerHasAPIKey(provider) {
 		return fmt.Errorf("provider %q requires apiKey", name)
 	}
 	if requiresModel && strings.TrimSpace(provider.Model) == "" {
@@ -1227,17 +1796,20 @@ func validateProviderConfig(name string, provider ProviderConfig) error {
 }
 
 func hasProviderCredentials(providerID string, provider ProviderConfig) bool {
+	if providerID == ProviderOpenAICodex {
+		return oauth.NewOpenAICodexTokenStore().HasUsableToken(time.Now().UTC(), 2*time.Minute)
+	}
 	requiresAPIKey, requiresModel, ok := ProviderRequirements(providerID)
 	if !ok {
 		return false
 	}
 	if requiresAPIKey {
-		return strings.TrimSpace(provider.APIKey) != ""
+		return providerHasAPIKey(provider)
 	}
 	if requiresModel {
 		return strings.TrimSpace(provider.Model) != ""
 	}
-	return strings.TrimSpace(provider.APIKey) != "" || strings.TrimSpace(provider.Model) != "" || strings.TrimSpace(provider.APIBase) != ""
+	return providerHasAPIKey(provider) || strings.TrimSpace(provider.Model) != "" || strings.TrimSpace(provider.APIBase) != ""
 }
 
 func migrateLegacyProviders(cfg *Config) {
@@ -1275,12 +1847,12 @@ func migrateLegacyChannels(cfg *Config) {
 		Label:     "Telegram",
 		Kind:      "core",
 		Enabled:   cfg.Channels.Telegram.Enabled,
-		Token:     strings.TrimSpace(cfg.Channels.Telegram.Token),
+		TokenRef:  strings.TrimSpace(cfg.Channels.Telegram.TokenRef),
 		AllowFrom: normalizeAllowFrom(cfg.Channels.Telegram.AllowFrom),
 	}
 	current := cfg.Channels.Registry["telegram"]
-	if strings.TrimSpace(current.Token) == "" && strings.TrimSpace(legacy.Token) != "" {
-		current.Token = legacy.Token
+	if strings.TrimSpace(current.TokenRef) == "" && strings.TrimSpace(legacy.TokenRef) != "" {
+		current.TokenRef = legacy.TokenRef
 	}
 	if len(current.AllowFrom) == 0 && len(legacy.AllowFrom) > 0 {
 		current.AllowFrom = legacy.AllowFrom
@@ -1293,7 +1865,7 @@ func migrateLegacyChannels(cfg *Config) {
 	telegram := cfg.Channels.Registry["telegram"]
 	cfg.Channels.Telegram = TelegramConfig{
 		Enabled:   telegram.Enabled,
-		Token:     strings.TrimSpace(telegram.Token),
+		TokenRef:  strings.TrimSpace(telegram.TokenRef),
 		AllowFrom: normalizeAllowFrom(telegram.AllowFrom),
 	}
 }
@@ -1351,6 +1923,80 @@ func nestedPathExists(root map[string]any, path ...string) bool {
 	return true
 }
 
+func validateNoPlaintextSecretsRaw(raw map[string]any) error {
+	if len(raw) == 0 {
+		return nil
+	}
+	violations := []string{}
+	record := func(path string, value any) {
+		if strings.TrimSpace(path) == "" {
+			return
+		}
+		switch typed := value.(type) {
+		case string:
+			if strings.TrimSpace(typed) != "" {
+				violations = append(violations, path)
+			}
+		}
+	}
+	obj := func(v any) map[string]any {
+		m, _ := v.(map[string]any)
+		return m
+	}
+
+	providers := obj(raw["providers"])
+	if providers != nil {
+		record("providers.openrouter.apiKey", obj(providers["openrouter"])["apiKey"])
+		record("providers.anthropic.apiKey", obj(providers["anthropic"])["apiKey"])
+		record("providers.openai.apiKey", obj(providers["openai"])["apiKey"])
+		record("providers.gemini.apiKey", obj(providers["gemini"])["apiKey"])
+		record("providers.ollama.apiKey", obj(providers["ollama"])["apiKey"])
+		record("providers.lmstudio.apiKey", obj(providers["lmstudio"])["apiKey"])
+		if registry, ok := providers["registry"].(map[string]any); ok {
+			for providerID, rawProvider := range registry {
+				record(fmt.Sprintf("providers.registry.%s.apiKey", providerID), obj(rawProvider)["apiKey"])
+			}
+		}
+	}
+
+	channels := obj(raw["channels"])
+	if channels != nil {
+		record("channels.telegram.token", obj(channels["telegram"])["token"])
+		if registry, ok := channels["registry"].(map[string]any); ok {
+			for channelID, rawChannel := range registry {
+				channel := obj(rawChannel)
+				record(fmt.Sprintf("channels.registry.%s.token", channelID), channel["token"])
+				record(fmt.Sprintf("channels.registry.%s.authToken", channelID), channel["authToken"])
+			}
+		}
+		if plugins, ok := channels["plugins"].(map[string]any); ok {
+			for channelID, rawChannel := range plugins {
+				record(fmt.Sprintf("channels.plugins.%s.authToken", channelID), obj(rawChannel)["authToken"])
+			}
+		}
+	}
+
+	tools := obj(raw["tools"])
+	if tools != nil {
+		record("tools.web.search.apiKey", obj(obj(tools["web"])["search"])["apiKey"])
+	}
+	runtime := obj(raw["runtime"])
+	if runtime != nil {
+		record("runtime.metricsHttp.authToken", obj(runtime["metricsHttp"])["authToken"])
+		if fed := obj(runtime["federation"]); fed != nil {
+			if peers, ok := fed["peers"].([]any); ok {
+				for idx, peer := range peers {
+					record(fmt.Sprintf("runtime.federation.peers[%d].authToken", idx), obj(peer)["authToken"])
+				}
+			}
+		}
+	}
+	if len(violations) == 0 {
+		return nil
+	}
+	return fmt.Errorf("plaintext secrets in config are not supported; move values to secretRef fields: %s", strings.Join(violations, ", "))
+}
+
 func applyDynamicProviderEnvOverrides(cfg *Config) {
 	const prefix = "SQUIDBOT_PROVIDER_"
 	for _, envEntry := range os.Environ() {
@@ -1375,6 +2021,12 @@ func applyDynamicProviderEnvOverrides(cfg *Config) {
 		case strings.HasSuffix(rest, "_MODEL"):
 			field = "model"
 			rest = strings.TrimSuffix(rest, "_MODEL")
+		case strings.HasSuffix(rest, "_OAUTH_ACCOUNT_ID"):
+			field = "oauth_account_id"
+			rest = strings.TrimSuffix(rest, "_OAUTH_ACCOUNT_ID")
+		case strings.HasSuffix(rest, "_OAUTH_AUDIENCE"):
+			field = "oauth_audience"
+			rest = strings.TrimSuffix(rest, "_OAUTH_AUDIENCE")
 		default:
 			continue
 		}
@@ -1388,11 +2040,15 @@ func applyDynamicProviderEnvOverrides(cfg *Config) {
 		current := cfg.Providers.Registry[providerID]
 		switch field {
 		case "api_key":
-			current.APIKey = value
+			current.APIKeyRef = "env:" + key
 		case "api_base":
 			current.APIBase = value
 		case "model":
 			current.Model = value
+		case "oauth_account_id":
+			current.OAuthAccountID = value
+		case "oauth_audience":
+			current.OAuthAudience = value
 		}
 		cfg.Providers.Registry[providerID] = current
 	}
@@ -1416,15 +2072,15 @@ func applyDynamicChannelEnvOverrides(cfg *Config) {
 		case strings.HasSuffix(rest, "_ENABLED"):
 			field = "enabled"
 			rest = strings.TrimSuffix(rest, "_ENABLED")
+		case strings.HasSuffix(rest, "_AUTH_TOKEN"):
+			field = "auth_token"
+			rest = strings.TrimSuffix(rest, "_AUTH_TOKEN")
 		case strings.HasSuffix(rest, "_TOKEN"):
 			field = "token"
 			rest = strings.TrimSuffix(rest, "_TOKEN")
 		case strings.HasSuffix(rest, "_ENDPOINT"):
 			field = "endpoint"
 			rest = strings.TrimSuffix(rest, "_ENDPOINT")
-		case strings.HasSuffix(rest, "_AUTH_TOKEN"):
-			field = "auth_token"
-			rest = strings.TrimSuffix(rest, "_AUTH_TOKEN")
 		default:
 			continue
 		}
@@ -1443,16 +2099,35 @@ func applyDynamicChannelEnvOverrides(cfg *Config) {
 				current.Enabled = enabled
 			}
 		case "token":
-			current.Token = value
+			current.TokenRef = "env:" + key
 		case "endpoint":
 			current.Endpoint = value
 		case "auth_token":
-			current.AuthToken = value
+			current.AuthTokenRef = "env:" + key
 		}
 		cfg.Channels.Registry[channelID] = current
 	}
 }
 
 func isEmptyProvider(provider ProviderConfig) bool {
-	return strings.TrimSpace(provider.APIKey) == "" && strings.TrimSpace(provider.APIBase) == "" && strings.TrimSpace(provider.Model) == ""
+	return strings.TrimSpace(provider.APIKeyRef) == "" &&
+		strings.TrimSpace(provider.APIKey) == "" &&
+		strings.TrimSpace(provider.APIBase) == "" &&
+		strings.TrimSpace(provider.Model) == "" &&
+		strings.TrimSpace(provider.OAuthAccountID) == "" &&
+		strings.TrimSpace(provider.OAuthAudience) == ""
+}
+
+func providerHasAPIKey(provider ProviderConfig) bool {
+	return strings.TrimSpace(provider.APIKey) != "" || strings.TrimSpace(provider.APIKeyRef) != ""
+}
+
+func setEnvSecretRef(target *string, envName string) {
+	if target == nil {
+		return
+	}
+	if strings.TrimSpace(os.Getenv(envName)) == "" {
+		return
+	}
+	*target = "env:" + envName
 }

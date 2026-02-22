@@ -19,9 +19,10 @@ import (
 )
 
 type Manager struct {
-	enabled bool
-	paths   []string
-	logger  *log.Logger
+	enabled      bool
+	paths        []string
+	envAllowlist []string
+	logger       *log.Logger
 
 	mu           sync.RWMutex
 	manifests    map[string]discoveredManifest
@@ -41,6 +42,7 @@ func NewManager(cfg config.Config, logger *log.Logger) *Manager {
 	return &Manager{
 		enabled:      cfg.Features.Plugins || cfg.Runtime.Plugins.Enabled,
 		paths:        paths,
+		envAllowlist: append([]string(nil), cfg.Runtime.Plugins.EnvAllowlist...),
 		logger:       logger,
 		manifests:    map[string]discoveredManifest{},
 		toolIndex:    map[string]RegisteredTool{},
@@ -134,7 +136,7 @@ func (m *Manager) clientFor(pluginName string, manifest discoveredManifest) (*pr
 	if existing, ok := m.clients[pluginName]; ok {
 		return existing, nil
 	}
-	client, err := startProcessClient(manifest, m.logger)
+	client, err := startProcessClient(manifest, m.envAllowlist, m.logger)
 	if err != nil {
 		return nil, err
 	}
@@ -185,9 +187,10 @@ type jsonRPCResponse struct {
 	Error   *jsonRPCError   `json:"error,omitempty"`
 }
 
-func startProcessClient(manifest discoveredManifest, logger *log.Logger) (*processClient, error) {
+func startProcessClient(manifest discoveredManifest, envAllowlist []string, logger *log.Logger) (*processClient, error) {
 	args := append([]string(nil), manifest.Args...)
 	cmd := exec.Command(strings.TrimSpace(manifest.Command), args...)
+	cmd.Env = filteredEnv(envAllowlist)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -270,4 +273,31 @@ func (c *processClient) close() error {
 	case err := <-done:
 		return err
 	}
+}
+
+func filteredEnv(allowlist []string) []string {
+	if len(allowlist) == 0 {
+		allowlist = []string{"PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR"}
+	}
+	allowed := map[string]struct{}{}
+	for _, item := range allowlist {
+		key := strings.TrimSpace(item)
+		if key == "" {
+			continue
+		}
+		allowed[key] = struct{}{}
+	}
+	env := os.Environ()
+	out := make([]string, 0, len(env))
+	for _, entry := range env {
+		parts := strings.SplitN(entry, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		if _, ok := allowed[parts[0]]; !ok {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
 }

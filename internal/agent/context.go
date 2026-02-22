@@ -22,10 +22,71 @@ const (
 )
 
 func buildSystemPrompt(cfg config.Config, userMessage string) string {
-	return buildSystemPromptWithSkills(cfg, userMessage, nil)
+	return buildSystemPromptWithSkillsAndOptions(cfg, userMessage, nil, defaultPromptBuildOptions(cfg))
 }
 
 func buildSystemPromptWithSkills(cfg config.Config, userMessage string, activation *skills.ActivationResult) string {
+	return buildSystemPromptWithSkillsAndOptions(cfg, userMessage, activation, defaultPromptBuildOptions(cfg))
+}
+
+type PromptBuildOptions struct {
+	BootstrapMaxChars      int
+	MemorySnippetMaxChars  int
+	IncludeCuratedMemory   bool
+	IncludeRetrievedMemory bool
+	IncludeRecentDaily     bool
+	IncludeSkills          bool
+	TopK                   int
+	RecentDailyLimit       int
+	SkillPromptMaxChars    int
+	SessionSummary         string
+	Bulletin               string
+}
+
+func defaultPromptBuildOptions(cfg config.Config) PromptBuildOptions {
+	return PromptBuildOptions{
+		BootstrapMaxChars:      maxBootstrapSectionChars,
+		MemorySnippetMaxChars:  maxMemorySnippetChars,
+		IncludeCuratedMemory:   true,
+		IncludeRetrievedMemory: true,
+		IncludeRecentDaily:     true,
+		IncludeSkills:          true,
+		TopK:                   cfg.Memory.TopK,
+		RecentDailyLimit:       minInt(4, cfg.Memory.TopK),
+		SkillPromptMaxChars:    cfg.Skills.PromptMaxChars,
+	}
+}
+
+func normalizePromptBuildOptions(cfg config.Config, options PromptBuildOptions) PromptBuildOptions {
+	if options.BootstrapMaxChars <= 0 {
+		options.BootstrapMaxChars = maxBootstrapSectionChars
+	}
+	if options.MemorySnippetMaxChars <= 0 {
+		options.MemorySnippetMaxChars = maxMemorySnippetChars
+	}
+	if options.TopK <= 0 {
+		options.TopK = cfg.Memory.TopK
+	}
+	if options.TopK <= 0 {
+		options.TopK = 8
+	}
+	if options.RecentDailyLimit <= 0 {
+		options.RecentDailyLimit = minInt(4, options.TopK)
+	}
+	if options.RecentDailyLimit <= 0 {
+		options.RecentDailyLimit = 4
+	}
+	if options.SkillPromptMaxChars <= 0 {
+		options.SkillPromptMaxChars = cfg.Skills.PromptMaxChars
+	}
+	if options.SkillPromptMaxChars <= 0 {
+		options.SkillPromptMaxChars = 12000
+	}
+	return options
+}
+
+func buildSystemPromptWithSkillsAndOptions(cfg config.Config, userMessage string, activation *skills.ActivationResult, options PromptBuildOptions) string {
+	options = normalizePromptBuildOptions(cfg, options)
 	workspace := config.WorkspacePath(cfg)
 	parts := []string{
 		"# squidbot",
@@ -46,12 +107,14 @@ func buildSystemPromptWithSkills(cfg config.Config, userMessage string, activati
 		if err != nil {
 			continue
 		}
-		parts = append(parts, fmt.Sprintf("## %s\n\n%s", name, truncateText(string(content), maxBootstrapSectionChars)))
+		parts = append(parts, fmt.Sprintf("## %s\n\n%s", name, truncateText(string(content), options.BootstrapMaxChars)))
 	}
 
-	memoryPath := filepath.Join(workspace, "memory", "MEMORY.md")
-	if memoryBytes, err := os.ReadFile(memoryPath); err == nil {
-		parts = append(parts, "## Curated Memory\n\n"+truncateText(string(memoryBytes), maxBootstrapSectionChars))
+	if options.IncludeCuratedMemory {
+		memoryPath := filepath.Join(workspace, "memory", "MEMORY.md")
+		if memoryBytes, err := os.ReadFile(memoryPath); err == nil {
+			parts = append(parts, "## Curated Memory\n\n"+truncateText(string(memoryBytes), options.BootstrapMaxChars))
+		}
 	}
 
 	memoryManager := memory.NewManager(cfg)
@@ -59,27 +122,42 @@ func buildSystemPromptWithSkills(cfg config.Config, userMessage string, activati
 		ctx := context.Background()
 		_ = memoryManager.Sync(ctx)
 
-		retrieved, err := memoryManager.Search(ctx, userMessage, cfg.Memory.TopK)
-		if err == nil && len(retrieved) > 0 {
-			lines := make([]string, 0, len(retrieved))
-			for _, chunk := range retrieved {
-				lines = append(lines, fmt.Sprintf("- %s: %s", shortPath(workspace, chunk.Path), truncateText(chunk.Content, maxMemorySnippetChars)))
+		if options.IncludeRetrievedMemory {
+			retrieved, err := memoryManager.Search(ctx, userMessage, options.TopK)
+			if err == nil && len(retrieved) > 0 {
+				lines := make([]string, 0, len(retrieved))
+				for _, chunk := range retrieved {
+					lines = append(lines, fmt.Sprintf("- %s: %s", shortPath(workspace, chunk.Path), truncateText(chunk.Content, options.MemorySnippetMaxChars)))
+				}
+				parts = append(parts, "## Retrieved Memory\n\n"+strings.Join(lines, "\n"))
 			}
-			parts = append(parts, "## Retrieved Memory\n\n"+strings.Join(lines, "\n"))
 		}
 
-		recentDaily, err := memoryManager.RecentDaily(ctx, minInt(4, cfg.Memory.TopK))
-		if err == nil && len(recentDaily) > 0 {
-			lines := make([]string, 0, len(recentDaily))
-			for _, chunk := range recentDaily {
-				lines = append(lines, fmt.Sprintf("- %s: %s", shortPath(workspace, chunk.Path), truncateText(chunk.Content, maxMemorySnippetChars)))
+		if options.IncludeRecentDaily {
+			recentDaily, err := memoryManager.RecentDaily(ctx, options.RecentDailyLimit)
+			if err == nil && len(recentDaily) > 0 {
+				lines := make([]string, 0, len(recentDaily))
+				for _, chunk := range recentDaily {
+					lines = append(lines, fmt.Sprintf("- %s: %s", shortPath(workspace, chunk.Path), truncateText(chunk.Content, options.MemorySnippetMaxChars)))
+				}
+				parts = append(parts, "## Recent Daily Memory\n\n"+strings.Join(lines, "\n"))
 			}
-			parts = append(parts, "## Recent Daily Memory\n\n"+strings.Join(lines, "\n"))
 		}
 	}
 
-	if section := renderSkillContractsSection(cfg, workspace, activation); strings.TrimSpace(section) != "" {
-		parts = append(parts, section)
+	if summary := strings.TrimSpace(options.SessionSummary); summary != "" {
+		parts = append(parts, "## Session Summary\n\n"+truncateText(summary, options.BootstrapMaxChars))
+	}
+	if bulletin := strings.TrimSpace(options.Bulletin); bulletin != "" {
+		parts = append(parts, "## Cortex Bulletin\n\n"+truncateText(bulletin, options.BootstrapMaxChars))
+	}
+
+	if options.IncludeSkills {
+		skillsCfg := cfg
+		skillsCfg.Skills.PromptMaxChars = options.SkillPromptMaxChars
+		if section := renderSkillContractsSection(skillsCfg, workspace, activation); strings.TrimSpace(section) != "" {
+			parts = append(parts, section)
+		}
 	}
 
 	return strings.Join(parts, "\n")

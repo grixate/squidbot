@@ -73,6 +73,10 @@ Memory is not a black box.
 Squidbot is designed for delegation.
 
 - Explicit subagent lifecycle management
+- New **Channel-Branch-Worker** runtime split:
+  - `Channel`: user-facing session actor loop
+  - `Branch`: lightweight reasoning fork (memory-first, limited tools)
+  - `Worker`: execution path (existing subagent + federation flow)
 - Isolated memory and budgets per agent
 - Federation HTTP server/client for trusted peer execution
 - Idempotency keys and peer health tracking
@@ -111,11 +115,11 @@ Squidbot supports autonomous workflows.
 
 Avoid provider lock-in.
 
-- Dynamic provider model routing
+- Process-aware model routing (channel/branch/worker/compactor/cortex)
 - OpenClaw catalog parity support
-- Out-of-box providers: OpenRouter, Anthropic, OpenAI, Gemini, Ollama, LM Studio, Moonshot AI, MiniMax
+- Out-of-box providers: OpenRouter, Anthropic, OpenAI, OpenAI Codex (OAuth), Gemini, Ollama, LM Studio, Moonshot AI, MiniMax
 - Multiple provider and channel profiles
-- Graceful fallback behavior
+- Per-process fallback model chains with cooldown for rate-limit pressure
 
 **Outcome:** portability without sacrificing capability.
 
@@ -127,6 +131,39 @@ Avoid provider lock-in.
 - Webhook / noop fallback for additional channels
 
 **Outcome:** high uptime even when integrations fail.
+
+### 🧰 MCP Tool Servers (Feature-Flagged)
+
+- Optional MCP ingestion from local stdio servers or remote HTTP endpoints
+- Discovered MCP tools are registered as runtime tools with `mcp_<server>_<tool>` names
+- Non-fatal startup behavior: failed MCP servers are skipped, healthy servers still load
+
+Enable with:
+
+```json
+{
+  "features": {
+    "mcp": true
+  },
+  "tools": {
+    "mcp": {
+      "enabled": true,
+      "connectTimeoutSec": 20,
+      "servers": {
+        "filesystem": {
+          "enabled": true,
+          "command": "npx",
+          "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/workspace"]
+        },
+        "remote": {
+          "enabled": true,
+          "url": "https://mcp.example.com/rpc"
+        }
+      }
+    }
+  }
+}
+```
 
 ---
 
@@ -167,12 +204,132 @@ Run without touching `~/.squidbot`:
 
 ## Architecture at a Glance
 
-1. Incoming message maps to a session actor
-2. Actor loads bounded history from BoltDB
-3. Prompt assembles memory, skills, and context
-4. Tool/model loop runs under configured budgets
-5. Events and usage are persisted
-6. Memory files are updated and re-indexed
+1. User message enters a session `Channel` actor turn
+2. Channel decides direct reply vs `Branch` reasoning vs `Worker` execution
+3. Prompt assembles history + memory + skills + cortex bulletin
+4. Tool/model loop runs with process-aware routing + fallbacks
+5. Worker results flow via existing subagent/federation lifecycle
+6. Background compactor trims old turns and injects summary markers
+7. Cortex periodically refreshes bulletin from memory slices
+8. Runs/events/usage are persisted for management observability
+
+---
+
+## Runtime Topology
+
+### Channel
+
+- Per-session actor loop and user-facing orchestration
+- Full tool registry, task automation, and outbound messaging
+
+### Branch
+
+- Ephemeral reasoning process with constrained toolset:
+  - `memory_recall`
+  - `memory_save`
+  - `memory_delete`
+  - `channel_recall`
+- Spawned via channel tools:
+  - `branch_spawn`
+  - `branch_status`
+  - `branch_wait`
+
+### Worker
+
+- Existing subagent pipeline (`spawn`, `subagent_wait`, `subagent_status`, etc.)
+- Supports local / remote / auto routing through federation
+- Keeps artifact and execution-oriented behavior unchanged
+
+---
+
+## Long-Run Conversation Hygiene
+
+### Background Compactor
+
+- Monitors context pressure after turns
+- Threshold actions:
+  - background compaction
+  - aggressive compaction
+  - emergency truncate (no LLM dependency)
+- Removes oldest turns, stores a compact summary marker
+- Guarantees one active compaction run per session
+
+### Cortex Bulletin
+
+- Periodic memory synthesis into a short operational bulletin
+- Injected into channel prompt each turn
+- Retains previous bulletin when generation fails
+
+---
+
+## New Runtime Config Blocks
+
+Under `runtime`:
+
+- `routing`:
+  - `channelModel`, `branchModel`, `workerModel`, `compactorModel`, `cortexModel`
+  - `taskOverrides`, `fallbacks`, `rateLimitCooldownSec`
+- `compaction`:
+  - `enabled`, `backgroundThresholdPct`, `aggressiveThresholdPct`, `emergencyThresholdPct`
+- `cortex`:
+  - `enabled`, `bulletinIntervalSec`, `bulletinMaxWords`
+
+Defaults are conservative and can be tuned incrementally.
+
+---
+
+## Management Surfaces (Board / API)
+
+Runtime observability endpoints:
+
+- `GET /api/manage/runtime/branches`
+- `GET /api/manage/runtime/compaction/runs`
+- `GET /api/manage/runtime/cortex/events`
+
+Memory bulletin endpoints:
+
+- `GET /api/manage/memory/bulletin`
+- `POST /api/manage/memory/bulletin/regenerate`
+
+Settings endpoints:
+
+- `GET/PUT /api/manage/settings/routing`
+- `GET/PUT /api/manage/settings/compaction`
+- `GET/PUT /api/manage/settings/cortex`
+
+---
+
+## Adaptive Context Control (Optional)
+
+When `contextControl.enabled` is true, Squidbot can adapt prompt assembly for smaller context windows:
+
+- model-window lookup from `workspace/.squidbot/model-windows.json`
+- staged compression at configured thresholds
+- optional session-summary persistence for long threads
+
+Model window registry format:
+
+```json
+{
+  "version": 1,
+  "defaults": {
+    "contextWindowTokens": 8192,
+    "outputReserveTokens": 1024,
+    "charsPerToken": 4.0
+  },
+  "models": [
+    {
+      "name": "gemma3:4b",
+      "aliases": ["gemma-3-4b", "google/gemma-3-4b-it"],
+      "contextWindowTokens": 8192,
+      "outputReserveTokens": 1024,
+      "charsPerToken": 3.6
+    }
+  ]
+}
+```
+
+The file is checked every request and reloaded when its mtime changes.
 
 ---
 
@@ -209,6 +366,9 @@ squidbot status
 squidbot agent -m "..."
 squidbot gateway
 squidbot doctor
+squidbot provider login openai-codex
+squidbot provider status openai-codex
+squidbot provider logout openai-codex
 
 squidbot cron list --all
 squidbot cron add --name ... --message ... --every <seconds>
@@ -224,27 +384,34 @@ squidbot skills reload
 squidbot budget status
 ```
 
+## OpenAI Codex OAuth Quickstart
+
+```bash
+squidbot onboard --non-interactive --provider openai-codex --model openai-codex/gpt-5.1-codex
+squidbot provider login openai-codex
+squidbot agent -m "hello"
+```
+
+Notes:
+- `features.codexOAuth` must be `true` to activate the Codex provider path.
+- OAuth tokens are stored outside `config.json` under `~/.squidbot/oauth/openai-codex.json`.
+
+## Migration & Rollout Docs
+
+- Migration guide: `docs/MCP_CODEX_MIGRATION.md`
+- Default-on readiness proposal: `docs/MCP_CODEX_DEFAULT_ON_PROPOSAL.md`
+
 ---
 
-## Roadmap
+## Runtime Status
 
-Squidbot is built around a reliability-first core. Upcoming work focuses on making power features easier to operate at scale.
+The following runtime evolution work is now integrated:
 
-### ✅ Near-term
-
-- **Configuration UI**
-  - A friendly interface for workspace setup, providers/channels, budgets, memory, and skills
-  - Validate configs before they go live (less "why is nothing working" time)
-
-- **Mission Control**
-  - Central dashboard for **tasks, resources, and analytics**
-  - Track job runs, budgets, tool usage, latency, failures, and success rates
-  - Clear "what happened, when, and why" views across sessions and automations
-
-- **Federated Multi-Agent Management**
-  - Visual control plane for subagents and federated nodes
-  - Agent lifecycle, budgets, and permissions management
-  - Peer health status, delegation history, and idempotent execution tracking
+- Channel-Branch-Worker process split
+- Background context compaction service
+- Process-aware model routing + fallbacks
+- Cortex bulletin generation and prompt injection
+- Management APIs/UI for runtime observability and settings
 
 ---
 
