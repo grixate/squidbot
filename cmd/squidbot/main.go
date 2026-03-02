@@ -51,6 +51,7 @@ func main() {
 
 func newRootCmd(logger *log.Logger) *cobra.Command {
 	var configPath string
+	rootConfigPath = &configPath
 	root := &cobra.Command{
 		Use:   "squidbot",
 		Short: "squidbot - Go-native personal AI assistant",
@@ -59,6 +60,7 @@ func newRootCmd(logger *log.Logger) *cobra.Command {
 	root.PersistentFlags().StringVar(&configPath, "config", "", "config file path")
 
 	root.AddCommand(onboardCmd(configPath))
+	root.AddCommand(manageCmd(configPath, logger))
 	root.AddCommand(statusCmd(configPath))
 	root.AddCommand(agentCmd(configPath, logger))
 	root.AddCommand(gatewayCmd(configPath, logger))
@@ -75,14 +77,27 @@ func printBanner(w io.Writer) {
 	fmt.Fprintln(w, squidbotRomanBanner)
 }
 
-func resolvedConfigPath(path string) string {
+var rootConfigPath *string
+
+func currentConfigPath(path string) string {
 	if strings.TrimSpace(path) != "" {
-		return path
+		return strings.TrimSpace(path)
+	}
+	if rootConfigPath != nil && strings.TrimSpace(*rootConfigPath) != "" {
+		return strings.TrimSpace(*rootConfigPath)
+	}
+	return ""
+}
+
+func resolvedConfigPath(path string) string {
+	if resolved := currentConfigPath(path); resolved != "" {
+		return resolved
 	}
 	return config.ConfigPath()
 }
 
 func loadCfg(path string) (config.Config, error) {
+	path = currentConfigPath(path)
 	cfg, err := config.Load(path)
 	if err != nil {
 		return cfg, err
@@ -113,12 +128,36 @@ func onboardCmd(configPath string) *cobra.Command {
 	var channelEnabledIDs []string
 	var channelEndpoints []string
 	var channelAuthTokens []string
+	var mode string
+	var remote bool
+	var manageHost string
+	var managePort int
+	var managePublicURL string
+	var password string
+	var passwordConfirm string
 
 	cmd := &cobra.Command{
 		Use:   "onboard",
 		Short: "Initialize squidbot config and workspace",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			printBanner(cmd.OutOrStdout())
+			selectedMode, err := resolveOnboardingMode(mode, nonInteractive, cmd.InOrStdin(), cmd.OutOrStdout())
+			if err != nil {
+				return err
+			}
+			if err := validateOnboardModeFlags(selectedMode, remote, manageHost, managePort, managePublicURL, password, passwordConfirm, nonInteractive); err != nil {
+				return err
+			}
+			if selectedMode == onboardingModeWeb {
+				return startManagementServer(cmd, log.New(os.Stderr, "", log.LstdFlags), configPath, managementRunConfig{
+					remote:          remote,
+					host:            manageHost,
+					port:            managePort,
+					publicBaseURL:   managePublicURL,
+					autoExitOnSetup: true,
+				})
+			}
+
 			cfg, err := loadCfg(configPath)
 			if err != nil {
 				return err
@@ -146,7 +185,21 @@ func onboardCmd(configPath string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := config.Save(configPath, result.Config); err != nil {
+			managementPassword, err := collectManagementPassword(
+				cmd.InOrStdin(),
+				cmd.OutOrStdout(),
+				12,
+				password,
+				passwordConfirm,
+				nonInteractive,
+			)
+			if err != nil {
+				return err
+			}
+			if err := applyManagementPassword(&result.Config, managementPassword); err != nil {
+				return err
+			}
+			if err := config.Save(currentConfigPath(configPath), result.Config); err != nil {
 				return err
 			}
 			if err := config.EnsureFilesystem(result.Config); err != nil {
@@ -177,6 +230,41 @@ func onboardCmd(configPath string) *cobra.Command {
 	cmd.Flags().StringSliceVar(&channelEnabledIDs, "channel-enable", nil, "Enable channel id (repeatable)")
 	cmd.Flags().StringSliceVar(&channelEndpoints, "channel-endpoint", nil, "Channel endpoint in id=url form (repeatable)")
 	cmd.Flags().StringSliceVar(&channelAuthTokens, "channel-auth-token", nil, "Channel auth token in id=token form (repeatable)")
+	cmd.Flags().StringVar(&mode, "mode", "", "Onboarding mode: cli or web")
+	cmd.Flags().BoolVar(&remote, "remote", false, "Expose web onboarding for remote access (web mode only)")
+	cmd.Flags().StringVar(&manageHost, "manage-host", "", "Management bind host override (web mode only)")
+	cmd.Flags().IntVar(&managePort, "manage-port", 0, "Management bind port override (web mode only)")
+	cmd.Flags().StringVar(&managePublicURL, "manage-public-url", "", "Public management URL to display and persist (web mode only)")
+	cmd.Flags().StringVar(&password, "password", "", "Management password (required for non-interactive CLI mode)")
+	cmd.Flags().StringVar(&passwordConfirm, "password-confirm", "", "Management password confirmation (required for non-interactive CLI mode)")
+	return cmd
+}
+
+func manageCmd(configPath string, logger *log.Logger) *cobra.Command {
+	var requireSetupToken bool
+	var remote bool
+	var manageHost string
+	var managePort int
+	var managePublicURL string
+
+	cmd := &cobra.Command{
+		Use:   "manage",
+		Short: "Start the browser onboarding server",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return startManagementServer(cmd, logger, configPath, managementRunConfig{
+				requireSetupToken: requireSetupToken,
+				remote:            remote,
+				host:              manageHost,
+				port:              managePort,
+				publicBaseURL:     managePublicURL,
+			})
+		},
+	}
+	cmd.Flags().BoolVar(&requireSetupToken, "require-setup-token", false, "Require a setup token for first-run web onboarding")
+	cmd.Flags().BoolVar(&remote, "remote", false, "Expose the management UI for remote access")
+	cmd.Flags().StringVar(&manageHost, "manage-host", "", "Management bind host override")
+	cmd.Flags().IntVar(&managePort, "manage-port", 0, "Management bind port override")
+	cmd.Flags().StringVar(&managePublicURL, "manage-public-url", "", "Public management URL to display and persist")
 	return cmd
 }
 

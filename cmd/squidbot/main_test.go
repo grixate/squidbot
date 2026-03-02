@@ -106,6 +106,8 @@ func TestOnboardStatusDoctorCommandsRemainRunnable(t *testing.T) {
 		"--provider", "gemini",
 		"--api-key", "sk-gemini",
 		"--model", "gemini-3.0-pro",
+		"--password", "very-secure-password",
+		"--password-confirm", "very-secure-password",
 	})
 	if err := onboard.Execute(); err != nil {
 		t.Fatalf("onboard should succeed: %v", err)
@@ -117,6 +119,9 @@ func TestOnboardStatusDoctorCommandsRemainRunnable(t *testing.T) {
 	}
 	if loaded.Providers.Active != config.ProviderGemini {
 		t.Fatalf("unexpected active provider: %s", loaded.Providers.Active)
+	}
+	if strings.TrimSpace(loaded.Auth.PasswordHash) == "" {
+		t.Fatal("expected onboarding to persist a management password hash")
 	}
 
 	status := statusCmd(configPath)
@@ -162,6 +167,9 @@ func TestRootCommandDoesNotPrintBannerOnNoArgs(t *testing.T) {
 	if !strings.Contains(output, "Usage:") {
 		t.Fatalf("expected root help output, got: %q", output)
 	}
+	if !strings.Contains(output, "manage") {
+		t.Fatalf("expected manage command in help output, got: %q", output)
+	}
 }
 
 func TestOnboardCommandPrintsBanner(t *testing.T) {
@@ -179,6 +187,8 @@ func TestOnboardCommandPrintsBanner(t *testing.T) {
 		"--provider", "gemini",
 		"--api-key", "sk-gemini",
 		"--model", "gemini-3.0-pro",
+		"--password", "very-secure-password",
+		"--password-confirm", "very-secure-password",
 	})
 
 	if err := onboard.Execute(); err != nil {
@@ -186,6 +196,88 @@ func TestOnboardCommandPrintsBanner(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), ".oooo.o") {
 		t.Fatalf("expected banner output for onboard, got: %q", out.String())
+	}
+}
+
+func TestOnboardCommandRequiresPasswordFlagsNonInteractive(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	configPath := writeTestConfig(t, baseTestConfig(t))
+
+	onboard := onboardCmd(configPath)
+	onboard.SilenceUsage = true
+	onboard.SilenceErrors = true
+	onboard.SetOut(io.Discard)
+	onboard.SetErr(io.Discard)
+	onboard.SetArgs([]string{
+		"--non-interactive",
+		"--provider", "gemini",
+		"--api-key", "sk-gemini",
+		"--model", "gemini-3.0-pro",
+	})
+
+	err := onboard.Execute()
+	if err == nil {
+		t.Fatal("expected password flag validation error")
+	}
+	if !strings.Contains(err.Error(), "--password and --password-confirm") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRootConfigFlagIsHonoredByOnboard(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	configPath := filepath.Join(t.TempDir(), "custom-config.json")
+
+	cmd := newRootCmd(log.New(io.Discard, "", 0))
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{
+		"--config", configPath,
+		"onboard",
+		"--non-interactive",
+		"--provider", "gemini",
+		"--api-key", "sk-gemini",
+		"--model", "gemini-3.0-pro",
+		"--password", "very-secure-password",
+		"--password-confirm", "very-secure-password",
+	})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("root onboard should succeed: %v", err)
+	}
+
+	loaded, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("expected config to be saved at explicit path: %v", err)
+	}
+	if loaded.Providers.Active != config.ProviderGemini {
+		t.Fatalf("unexpected active provider in explicit config: %s", loaded.Providers.Active)
+	}
+}
+
+func TestResolveOnboardingModePromptsInteractiveSelection(t *testing.T) {
+	var out bytes.Buffer
+	mode, err := resolveOnboardingMode("", false, strings.NewReader("2\n"), &out)
+	if err != nil {
+		t.Fatalf("resolve onboarding mode failed: %v", err)
+	}
+	if mode != onboardingModeWeb {
+		t.Fatalf("expected web mode, got %q", mode)
+	}
+	if !strings.Contains(out.String(), "Choose onboarding mode:") {
+		t.Fatalf("expected mode prompt output, got %q", out.String())
+	}
+}
+
+func TestValidateOnboardModeFlagsRejectsWebFlagsForCLI(t *testing.T) {
+	err := validateOnboardModeFlags(onboardingModeCLI, true, "", 0, "", "", "", false)
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if !strings.Contains(err.Error(), "web management flags require --mode web") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -207,6 +299,8 @@ func TestOnboardCommandPersistsTelegramFlagsNonInteractive(t *testing.T) {
 		"--telegram-token", "bot-token",
 		"--telegram-allow-from", "123,@alice",
 		"--telegram-allow-from", "@Alice",
+		"--password", "very-secure-password",
+		"--password-confirm", "very-secure-password",
 	})
 
 	if err := onboard.Execute(); err != nil {
@@ -263,13 +357,14 @@ func TestRootCommandDoesNotPrintBannerForSubcommand(t *testing.T) {
 	}
 }
 
-func TestRootCommandDoesNotExposeManage(t *testing.T) {
+func TestRootCommandExposesManage(t *testing.T) {
 	cmd := newRootCmd(log.New(io.Discard, "", 0))
 	for _, sub := range cmd.Commands() {
 		if sub.Name() == "manage" {
-			t.Fatal("expected manage command to be removed")
+			return
 		}
 	}
+	t.Fatal("expected manage command to be present")
 }
 
 func TestGatewayCommandDoesNotExposeWithManageFlag(t *testing.T) {
@@ -377,10 +472,10 @@ func TestBudgetCommandsPersistOverride(t *testing.T) {
 	}
 }
 
-func TestOnboardCommandDoesNotExposeWebMode(t *testing.T) {
+func TestOnboardCommandExposesModeSelection(t *testing.T) {
 	cmd := onboardCmd("")
-	if cmd.Flags().Lookup("mode") != nil {
-		t.Fatal("expected --mode flag to be removed")
+	if cmd.Flags().Lookup("mode") == nil {
+		t.Fatal("expected --mode flag to be present")
 	}
 }
 
